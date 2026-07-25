@@ -35,7 +35,7 @@ import {
   Volume2,
 } from "lucide-react"
 
-import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar"
+import { Avatar, AvatarFallback } from "@/components/ui/avatar"
 import { Badge } from "@/components/ui/badge"
 import { Bubble, BubbleContent } from "@/components/ui/bubble"
 import { Button } from "@/components/ui/button"
@@ -93,9 +93,49 @@ type TurnStage = "idle" | "understanding" | "searching" | "retrieving" | "answer
 type AlertState = "open" | "checking" | "safe"
 type ApprovalState = "pending" | "approved" | "rejected"
 
+type StoredAlert = {
+  id: string
+  type: "possible_fall" | "sensitive_memory" | "reminder"
+  severity: "info" | "important" | "urgent"
+  status: "open" | "checking" | "resolved"
+  title: string
+  message: string
+  createdAt: string
+}
+
+type StoredApproval = {
+  id: string
+  statement: string
+  state: ApprovalState
+}
+
+type SpeechResultEvent = {
+  results: ArrayLike<ArrayLike<{ transcript: string }> & { isFinal: boolean }>
+}
+
+type BrowserSpeechRecognition = {
+  lang: string
+  continuous: boolean
+  interimResults: boolean
+  onresult: ((event: SpeechResultEvent) => void) | null
+  onerror: (() => void) | null
+  onend: (() => void) | null
+  start(): void
+  stop(): void
+  abort(): void
+}
+
+type SpeechRecognitionWindow = Window & typeof globalThis & {
+  SpeechRecognition?: new () => BrowserSpeechRecognition
+  webkitSpeechRecognition?: new () => BrowserSpeechRecognition
+}
+
 type DemoTurn = {
   query: string
   stage: TurnStage
+  answer: string | null
+  provider: string | null
+  evidenceCount: number
   start: (query: string) => void
   reset: () => void
 }
@@ -109,48 +149,100 @@ const stageIndex: Record<TurnStage, number> = {
   done: 4,
 }
 
-function useDemoTurn(): DemoTurn {
+type ChatApiResponse = {
+  answer?: string
+  provider?: string
+  evidence?: Array<{ id: string }>
+  error?: string
+}
+
+function householdId() {
+  const key = "tomo-household-id"
+  const existing = window.localStorage.getItem(key)
+  if (existing) return existing
+  const created = `guest_${crypto.randomUUID().replaceAll("-", "")}`
+  window.localStorage.setItem(key, created)
+  return created
+}
+
+function useDemoTurn(audience: Role): DemoTurn {
   const [query, setQuery] = React.useState("")
   const [stage, setStage] = React.useState<TurnStage>("idle")
-  const timers = React.useRef<number[]>([])
+  const [answer, setAnswer] = React.useState<string | null>(null)
+  const [provider, setProvider] = React.useState<string | null>(null)
+  const [evidenceCount, setEvidenceCount] = React.useState(0)
+  const request = React.useRef<AbortController | null>(null)
 
-  React.useEffect(() => () => timers.current.forEach(window.clearTimeout), [])
+  React.useEffect(() => () => request.current?.abort(), [])
 
   function start(nextQuery: string) {
     if (!nextQuery.trim()) return
-    timers.current.forEach(window.clearTimeout)
-    timers.current = []
-    setQuery(nextQuery.trim())
+    request.current?.abort()
+    const controller = new AbortController()
+    request.current = controller
+    const message = nextQuery.trim()
+    setQuery(message)
+    setAnswer(null)
+    setProvider(null)
+    setEvidenceCount(0)
     setStage("understanding")
-    timers.current.push(window.setTimeout(() => setStage("searching"), 650))
-    timers.current.push(window.setTimeout(() => setStage("retrieving"), 1350))
-    timers.current.push(window.setTimeout(() => setStage("answering"), 2100))
-    timers.current.push(window.setTimeout(() => setStage("done"), 2950))
+    void (async () => {
+      try {
+        const remember = audience === "caregiver" && /^remember\b/i.test(message)
+        setStage("searching")
+        const response = await fetch(remember ? "/api/memories" : "/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-tomo-household": householdId(),
+          },
+          body: JSON.stringify(remember
+            ? { description: message.replace(/^remember(?: that)?\s*/i, ""), provenance: "caregiver", importance: "important" }
+            : { message, locale: /[\u3040-\u30ff\u3400-\u9fff]/.test(message) ? "ja" : "en" }),
+          signal: controller.signal,
+        })
+        setStage("retrieving")
+        const payload = await response.json() as ChatApiResponse & { memory?: { description?: string } }
+        if (!response.ok) throw new Error(payload.error || "TOMO could not complete that request")
+        setEvidenceCount(payload.evidence?.length ?? 0)
+        setProvider(payload.provider ?? (remember ? "d1" : "deterministic"))
+        setStage("answering")
+        setAnswer(remember
+          ? `I saved this as a trusted caregiver memory: ${payload.memory?.description ?? message}`
+          : payload.answer ?? "I could not find a grounded answer.")
+        setStage("done")
+      } catch (error) {
+        if (controller.signal.aborted) return
+        setProvider("error")
+        setAnswer(error instanceof Error ? error.message : "TOMO could not complete that request")
+        setStage("done")
+      }
+    })()
   }
 
   function reset() {
-    timers.current.forEach(window.clearTimeout)
-    timers.current = []
+    request.current?.abort()
     setQuery("")
+    setAnswer(null)
+    setProvider(null)
+    setEvidenceCount(0)
     setStage("idle")
   }
 
-  return { query, stage, start, reset }
+  return { query, stage, answer, provider, evidenceCount, start, reset }
 }
 
-function TomoMark({ className, square = false }: { className?: string; square?: boolean }) {
-  return (
-    <Avatar className={cn(className, square && "rounded-2xl")}>
-      <AvatarImage src="/tomo-logo.png" alt="TOMO logo" className={cn(square && "rounded-2xl")} />
-      <AvatarFallback className={cn(square && "rounded-2xl")}>TO</AvatarFallback>
-    </Avatar>
-  )
+function TomoMark({ className }: { className?: string }) {
+  // vinext's image optimizer only accepts its configured responsive widths;
+  // this fixed 40px local asset should be served directly.
+  // eslint-disable-next-line @next/next/no-img-element
+  return <img src="/brand/mark-black-transparent.png" alt="TOMO logo" width={40} height={40} className={cn("size-10 shrink-0 object-contain", className)} />
 }
 
 function Brand() {
   return (
     <div className="flex items-center gap-3" aria-label="TOMO home">
-      <TomoMark className="size-10" square />
+      <TomoMark className="size-10" />
       <div>
         <p className="text-lg font-semibold leading-none tracking-[-0.035em]">tomo</p>
         <p className="mt-1 hidden text-xs text-muted-foreground sm:block">A familiar voice, close by.</p>
@@ -238,14 +330,14 @@ function LiveCameraPanel() {
 }
 
 function LocalAnalysisCard() {
-  const { demoFallActive, demoGlassesEnabled, detections, inferenceMs, runtime, setDemoGlassesEnabled, simulateFall, state } = useLiveCamera()
+  const { demoFallActive, realFallActive, fallConfidence, demoGlassesEnabled, detections, inferenceMs, runtime, setDemoGlassesEnabled, simulateFall, state } = useLiveCamera()
   return (
     <Card>
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle>Live local analysis</CardTitle><CardDescription>{state === "live" ? `${detections.length} objects in the latest frame` : "Detector is starting"}</CardDescription></div><Badge variant="secondary"><ShieldCheck /> Local only</Badge></CardHeader>
       <CardContent className="space-y-1">
         <StatusRow icon={<Search />} label="YOLO26n object recognition" detail={state === "live" ? `${runtime} · ${inferenceMs || "—"} ms · ${detections.length} detected` : "Loading model and camera"} />
         <Separator />
-        <StatusRow icon={<Activity />} label="Fall workflow" detail={demoFallActive ? "Possible fall demo is active" : "Demo trigger ready · real model integration follows deployment"} />
+        <StatusRow icon={<Activity />} label="Memoria temporal fall model" detail={realFallActive ? `Possible fall confirmed locally · ${Math.round(fallConfidence * 100)}% raw confidence` : demoFallActive ? "Possible fall demo is active" : "Running locally with 3-of-5 temporal confirmation"} />
         <Separator />
         <StatusRow icon={<Clock3 />} label="Temporary video buffer" detail="Recent seconds in device memory only" />
         <Separator />
@@ -293,6 +385,18 @@ function TodayCard() {
   )
 }
 
+function WeatherCard() {
+  const [weather, setWeather] = React.useState<{ temperature: number; guidance: string } | null>(null)
+  React.useEffect(() => {
+    void fetch("/api/weather").then((response) => response.ok ? response.json() : null).then((payload) => {
+      if (payload?.weather) setWeather(payload.weather)
+    }).catch(() => undefined)
+  }, [])
+  return (
+    <Card size="sm" className="hidden sm:flex"><CardContent className="flex"><CloudSun className="mr-3 size-5" /><div><p className="font-medium">{weather ? `${Math.round(weather.temperature)}° in Tokyo` : "Checking today’s weather"}</p><p className="text-sm text-muted-foreground">{weather?.guidance ?? "Live guidance will appear here."}</p></div></CardContent></Card>
+  )
+}
+
 function IdleCameraCard() {
   const { detections, state } = useLiveCamera()
   return (
@@ -317,22 +421,50 @@ function IdleCameraCard() {
 
 function PatientHome({ role, onRoleChange, onAsk, onOpenChat }: { role: Role; onRoleChange: (role: Role) => void; onAsk: (query: string) => void; onOpenChat: () => void }) {
   const [voiceState, setVoiceState] = React.useState<VoiceState>("ready")
-  const voiceTimer = React.useRef<number | null>(null)
+  const [liveTranscript, setLiveTranscript] = React.useState("")
+  const recognitionRef = React.useRef<BrowserSpeechRecognition | null>(null)
 
-  React.useEffect(() => () => { if (voiceTimer.current) window.clearTimeout(voiceTimer.current) }, [])
+  React.useEffect(() => () => recognitionRef.current?.abort(), [])
 
   function beginVoiceQuestion() {
     if (voiceState === "listening") {
-      if (voiceTimer.current) window.clearTimeout(voiceTimer.current)
-      setVoiceState("ready")
-      onAsk("Where are my glasses? I want to go outside.")
+      recognitionRef.current?.stop()
       return
     }
-    setVoiceState("listening")
-    voiceTimer.current = window.setTimeout(() => {
+
+    const speechWindow = window as SpeechRecognitionWindow
+    const Recognition = speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition
+    if (!Recognition) {
+      onOpenChat()
+      return
+    }
+
+    const recognition = new Recognition()
+    recognitionRef.current = recognition
+    recognition.lang = navigator.language.startsWith("ja") ? "ja-JP" : "en-US"
+    recognition.continuous = false
+    recognition.interimResults = true
+    recognition.onresult = (event) => {
+      const results = Array.from(event.results)
+      const transcript = results.map((result) => result[0]?.transcript ?? "").join(" ").trim()
+      setLiveTranscript(transcript)
+      if (results.some((result) => result.isFinal) && transcript) {
+        recognitionRef.current = null
+        setVoiceState("ready")
+        onAsk(transcript)
+      }
+    }
+    recognition.onerror = () => {
+      recognitionRef.current = null
       setVoiceState("ready")
-      onAsk("Where are my glasses? I want to go outside.")
-    }, 1200)
+    }
+    recognition.onend = () => {
+      recognitionRef.current = null
+      setVoiceState("ready")
+    }
+    setLiveTranscript("")
+    setVoiceState("listening")
+    recognition.start()
   }
 
   return (
@@ -340,8 +472,8 @@ function PatientHome({ role, onRoleChange, onAsk, onOpenChat }: { role: Role; on
       <header><div className="mx-auto flex min-h-20 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8"><Brand /><div className="flex items-center gap-2"><LanguageButton /><RoleControl role={role} onRoleChange={onRoleChange} /></div></div></header>
       <section className="mx-auto grid min-h-[calc(100dvh-5rem)] max-w-7xl place-items-center px-4 py-6 sm:px-6 lg:px-8">
         <div className="grid w-full items-center gap-8 lg:grid-cols-[minmax(14rem,.7fr)_minmax(24rem,1fr)_minmax(14rem,.7fr)]">
-          <div className="order-2 space-y-3 lg:order-1"><p className="text-center text-sm font-medium text-muted-foreground lg:text-left">Today</p><TodayCard /><Card size="sm" className="hidden sm:flex"><CardContent className="flex"><CloudSun className="mr-3 size-5" /><div><p className="font-medium">27° and sunny</p><p className="text-sm text-muted-foreground">Take water when you go out.</p></div></CardContent></Card></div>
-          <div className="order-1 flex flex-col items-center text-center lg:order-2"><Badge variant="outline" className="mb-5 bg-background"><ShieldCheck /> Camera processing locally</Badge><p className="text-sm font-medium text-muted-foreground">Good morning, Keiko</p><h1 className="mt-2 max-w-xl text-4xl font-semibold tracking-[-.055em] sm:text-5xl">What can I help you remember?</h1><div className="my-8"><VoiceOrb state={voiceState} onActivate={beginVoiceQuestion} /></div><div className="flex flex-wrap items-center justify-center gap-2"><Button variant="outline" size="lg" className="min-h-12"><Volume2 /> Repeat</Button><Button variant="outline" size="lg" className="min-h-12" onClick={onOpenChat}><MessageCircle /> Type instead</Button><CallYuki prominent /></div></div>
+          <div className="order-2 space-y-3 lg:order-1"><p className="text-center text-sm font-medium text-muted-foreground lg:text-left">Today</p><TodayCard /><WeatherCard /></div>
+          <div className="order-1 flex flex-col items-center text-center lg:order-2"><Badge variant="outline" className="mb-5 bg-background"><ShieldCheck /> Camera processing locally</Badge><p className="text-sm font-medium text-muted-foreground">Good morning, Keiko</p><h1 className="mt-2 max-w-xl text-4xl font-semibold tracking-[-.055em] sm:text-5xl">What can I help you remember?</h1><div className="my-8"><VoiceOrb state={voiceState} onActivate={beginVoiceQuestion} />{liveTranscript && <p className="mt-5 max-w-lg text-xl" aria-live="polite">“{liveTranscript}”</p>}</div><div className="flex flex-wrap items-center justify-center gap-2"><Button variant="outline" size="lg" className="min-h-12" onClick={() => { if (liveTranscript) onAsk(liveTranscript) }}><Volume2 /> Repeat</Button><Button variant="outline" size="lg" className="min-h-12" onClick={onOpenChat}><MessageCircle /> Type instead</Button><CallYuki prominent /></div></div>
           <div className="order-3 space-y-3"><IdleCameraCard /><div className="flex justify-center"><CameraStatus compact /></div></div>
         </div>
       </section>
@@ -399,37 +531,6 @@ function EvidenceFrame({ kind = "object" }: { kind?: "object" | "fall" }) {
   )
 }
 
-function GlassesMockAnswer() {
-  return (
-    <>
-      <p>Your glasses are on the white table in front of you.</p>
-      <EvidenceFrame />
-      <Card size="sm">
-        <CardContent className="flex items-start gap-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-muted"><CloudSun className="size-5" /></span>
-          <div><p className="font-medium">It’s 32°C and hot outside.</p><p className="mt-1 text-sm text-muted-foreground">Please take a water bottle with you.</p></div>
-        </CardContent>
-      </Card>
-    </>
-  )
-}
-
-function TodayMockAnswer() {
-  return (
-    <>
-      <p>You’re meeting Yuki today at 2:00 PM.</p>
-      <Card size="sm">
-        <CardContent className="flex items-center gap-3">
-          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-muted"><CalendarDays className="size-5" /></span>
-          <div className="min-w-0 flex-1"><p className="font-medium">Meet Yuki</p><p className="text-sm text-muted-foreground">Today at 2:00 PM · Leave by 1:30 PM</p></div>
-          <Badge variant="secondary">Today</Badge>
-        </CardContent>
-      </Card>
-      <p className="text-sm text-muted-foreground">I’ll remind you again before it’s time to leave.</p>
-    </>
-  )
-}
-
 function TurnActivity({ stage }: { stage: TurnStage }) {
   if (stage === "idle" || stage === "done") return null
   const current = stageIndex[stage]
@@ -482,8 +583,16 @@ function ChatComposer({ placeholder, onSubmit, patient = false }: { placeholder:
 
 function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: DemoTurn; onBack: () => void }) {
   const caregiverSaved = audience === "caregiver" && turn.query.toLowerCase().includes("remember")
-  const caregiverFallQuery = audience === "caregiver" && /fall|incident|happened|before/.test(turn.query.toLowerCase())
-  const patientScheduleQuery = audience === "patient" && /what.*today|do today|schedule|plans|have to do/.test(turn.query.toLowerCase())
+
+  React.useEffect(() => {
+    if (audience !== "patient" || turn.stage !== "done" || !turn.answer || turn.provider === "error" || !("speechSynthesis" in window)) return
+    window.speechSynthesis.cancel()
+    const speech = new SpeechSynthesisUtterance(turn.answer)
+    speech.lang = /[\u3040-\u30ff\u3400-\u9fff]/.test(turn.answer) ? "ja-JP" : "en-US"
+    speech.rate = 0.95
+    window.speechSynthesis.speak(speech)
+    return () => window.speechSynthesis.cancel()
+  }, [audience, turn.answer, turn.provider, turn.stage])
 
   return (
     <div className="flex min-h-dvh flex-col bg-muted/30">
@@ -515,8 +624,9 @@ function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: DemoT
                   {turn.stage === "done" && (
                     <MessageScrollerItem messageId="answer" scrollAnchor>
                       <Message><MessageAvatar><TomoMark className="size-8" /></MessageAvatar><MessageContent><MessageHeader>TOMO</MessageHeader><Bubble variant="ghost" className="w-full"><BubbleContent className="w-full space-y-4 text-base">
-                        {caregiverSaved ? <><p>I saved this as a trusted caregiver memory: Keiko’s blue folder is in the hallway drawer.</p><Card size="sm"><CardContent className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-2xl bg-muted"><Database className="size-4" /></span><div><p className="font-medium">Memory added</p><p className="text-sm text-muted-foreground">Caregiver-provided · Semantically searchable</p></div><Badge variant="secondary" className="ml-auto"><Check /> Trusted</Badge></CardContent></Card></> : caregiverFallQuery ? <><p>Immediately before the alert, Keiko moved quickly beside the living-room chair and then remained low for 12 seconds.</p><EvidenceFrame kind="fall" /></> : patientScheduleQuery ? <TodayMockAnswer /> : <GlassesMockAnswer />}
-                      </BubbleContent></Bubble><MessageFooter>{caregiverSaved ? "Saved with caregiver provenance" : "Grounded in the latest trusted memory and supporting frame"}</MessageFooter></MessageContent></Message>
+                        <p>{turn.answer}</p>
+                        {caregiverSaved ? <Card size="sm"><CardContent className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-2xl bg-muted"><Database className="size-4" /></span><div><p className="font-medium">Memory added</p><p className="text-sm text-muted-foreground">Caregiver-provided · Searchable in D1</p></div><Badge variant="secondary" className="ml-auto"><Check /> Trusted</Badge></CardContent></Card> : turn.evidenceCount > 0 && /glasses|keys|where/i.test(turn.query) ? <EvidenceFrame /> : null}
+                      </BubbleContent></Bubble><MessageFooter>{turn.provider ? `Provider: ${turn.provider} · ${turn.evidenceCount} trusted evidence result${turn.evidenceCount === 1 ? "" : "s"}` : "Grounded response"}</MessageFooter></MessageContent></Message>
                     </MessageScrollerItem>
                   )}
                 </MessageScrollerContent>
@@ -543,16 +653,59 @@ function CaregiverNav({ current, onChange }: { current: CaregiverView; onChange:
   )
 }
 
-function ApprovalCard({ state, onStateChange }: { state: ApprovalState; onStateChange: (state: ApprovalState) => void }) {
+function ApprovalCard({ approval, onResolved }: { approval: StoredApproval | null; onResolved: () => void }) {
+  const [busy, setBusy] = React.useState(false)
+
+  async function resolve(state: "approved" | "rejected") {
+    if (!approval || busy) return
+    setBusy(true)
+    try {
+      const response = await fetch(`/api/approvals/${approval.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", "x-tomo-household": householdId() },
+        body: JSON.stringify({ state, resolvedBy: "Yuki" }),
+      })
+      if (response.ok) onResolved()
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  if (!approval) return <Card size="sm"><CardHeader><CardTitle>No pending approvals</CardTitle><CardDescription>Patient-submitted sensitive facts appear here before they enter trusted memory.</CardDescription></CardHeader></Card>
   return (
-    <Card size="sm"><CardHeader><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-muted-foreground">Sensitive memory request</p><CardTitle className="mt-1">Medicine reminder at 8:00 PM</CardTitle></div><Badge variant={state === "pending" ? "outline" : state === "approved" ? "secondary" : "destructive"}>{state}</Badge></div><CardDescription>Keiko said: “Please remember that I take my medicine at eight.”</CardDescription></CardHeader>{state === "pending" && <CardContent className="flex flex-wrap gap-2"><Button onClick={() => onStateChange("approved")}><Check /> Approve</Button><Button variant="outline">Edit first</Button><Button variant="ghost" onClick={() => onStateChange("rejected")}>Reject</Button></CardContent>}</Card>
+    <Card size="sm"><CardHeader><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold uppercase tracking-[.14em] text-muted-foreground">Sensitive memory request</p><CardTitle className="mt-1">Caregiver confirmation required</CardTitle></div><Badge variant="outline">{approval.state}</Badge></div><CardDescription>{approval.statement}</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Button disabled={busy} onClick={() => void resolve("approved")}><Check /> Approve</Button><Button variant="ghost" disabled={busy} onClick={() => void resolve("rejected")}>Reject</Button></CardContent></Card>
   )
 }
 
 function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role; onRoleChange: (role: Role) => void; view: CaregiverView; onViewChange: (view: CaregiverView) => void }) {
-  const [alertState, setAlertState] = React.useState<AlertState>("open")
-  const [approvalState, setApprovalState] = React.useState<ApprovalState>("pending")
+  const [storedAlert, setStoredAlert] = React.useState<StoredAlert | null>(null)
+  const [storedApproval, setStoredApproval] = React.useState<StoredApproval | null>(null)
+  const [refreshToken, setRefreshToken] = React.useState(0)
+  const alertState: AlertState = storedAlert?.status === "resolved" ? "safe" : storedAlert?.status ?? "open"
   const resolved = alertState === "safe"
+
+  React.useEffect(() => {
+    const headers = { "x-tomo-household": householdId() }
+    void Promise.all([
+      fetch("/api/alerts", { headers }).then((response) => response.ok ? response.json() : { alerts: [] }),
+      fetch("/api/approvals", { headers }).then((response) => response.ok ? response.json() : { approvals: [] }),
+    ]).then(([alertPayload, approvalPayload]) => {
+      const possibleFall = (alertPayload.alerts as StoredAlert[]).find((alert) => alert.type === "possible_fall") ?? null
+      const pendingApproval = (approvalPayload.approvals as StoredApproval[]).find((approval) => approval.state === "pending") ?? null
+      setStoredAlert(possibleFall)
+      setStoredApproval(pendingApproval)
+    }).catch(() => undefined)
+  }, [refreshToken])
+
+  async function updateAlert(status: "checking" | "resolved") {
+    if (!storedAlert) return
+    const response = await fetch(`/api/alerts/${storedAlert.id}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", "x-tomo-household": householdId() },
+      body: JSON.stringify({ status, actor: "Yuki" }),
+    })
+    if (response.ok) setStoredAlert((current) => current ? { ...current, status } : current)
+  }
 
   return (
     <main className="min-h-dvh bg-background">
@@ -560,7 +713,7 @@ function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role
       <div className="mx-auto grid max-w-[98rem] lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_20rem_minmax(0,1fr)]">
         <aside className="hidden border-r p-5 lg:block"><CaregiverNav current={view} onChange={onViewChange} /><Card size="sm" className="mt-8"><CardContent><p className="text-sm font-medium">System healthy</p><p className="mt-1 text-xs text-muted-foreground">Keiko’s device checked in now</p></CardContent></Card></aside>
         <aside className="hidden border-r p-5 xl:block"><div className="mb-5 flex items-center justify-between"><h1 className="text-xl font-semibold">Care inbox</h1><Badge variant="destructive">2 new</Badge></div><div className="grid gap-2"><Button type="button" variant="destructive" className="h-auto items-stretch rounded-3xl p-4 text-left"><span className="w-full"><span className="flex items-center justify-between"><Badge variant="destructive">Possible fall</Badge><span className="text-xs">10:41</span></span><span className="mt-3 block font-medium">Keiko · Living room</span><span className="mt-1 block text-sm">No response after check-in</span></span></Button><Button type="button" variant="outline" className="h-auto items-stretch rounded-3xl p-4 text-left"><span className="w-full"><span className="flex items-center justify-between"><Badge variant="outline">Approval</Badge><span className="text-xs text-muted-foreground">10:18</span></span><span className="mt-3 block font-medium">Medicine reminder</span><span className="mt-1 block text-sm text-muted-foreground">Patient-submitted information</span></span></Button><Button type="button" variant="ghost" className="h-auto items-stretch rounded-3xl border p-4 text-left"><span className="w-full"><span className="flex items-center justify-between"><Badge variant="secondary">Memory</Badge><span className="text-xs text-muted-foreground">10:36</span></span><span className="mt-3 block font-medium">Glasses located</span><span className="mt-1 block text-sm text-muted-foreground">Entrance table</span></span></Button></div></aside>
-        <section className="min-w-0 space-y-5 p-4 sm:p-6"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-muted-foreground">Selected incident</p><h2 className="text-2xl font-semibold tracking-tight">Possible fall in the living room</h2></div><Badge variant={resolved ? "secondary" : "destructive"}>{resolved ? "Resolved" : "Action recommended"}</Badge></div><div className="grid gap-5 2xl:grid-cols-[1.15fr_.85fr]"><EvidenceFrame kind="fall" /><div className="space-y-5"><Card className={cn(!resolved && "border-destructive/30")}><CardHeader><div className="flex items-start justify-between gap-3"><span className={cn("flex size-11 items-center justify-center rounded-2xl", resolved ? "bg-secondary" : "bg-destructive/10 text-destructive")}>{resolved ? <CircleCheck /> : <AlertTriangle />}</span><Badge variant={resolved ? "secondary" : "destructive"}>{resolved ? "Safe" : "Urgent"}</Badge></div><CardTitle className="text-2xl">{resolved ? "Keiko was marked safe" : alertState === "checking" ? "Yuki is checking now" : "Possible fall — please check"}</CardTitle><CardDescription>TOMO observed a rapid posture change and 12 seconds without movement.</CardDescription></CardHeader><CardContent className="sticky bottom-4 flex flex-wrap gap-2 rounded-3xl border bg-background/95 p-2 shadow-md backdrop-blur sm:static sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none"><Button className="min-h-12 min-w-32 flex-1" disabled={resolved} onClick={() => setAlertState("checking")}><UserRound /> I’m checking</Button><Button className="min-h-12 min-w-32 flex-1" variant="outline"><Phone /> Call Keiko</Button><Button className="min-h-12 min-w-32 flex-1" variant="secondary" disabled={resolved} onClick={() => setAlertState("safe")}><CircleCheck /> Resolve</Button></CardContent></Card><Card><CardHeader><CardTitle>Detection timeline</CardTitle></CardHeader><CardContent className="space-y-4">{[["10:40:56", "Rapid posture change"], ["10:41:02", "Person remained low"], ["10:41:08", "TOMO asked if Keiko is okay"]].map(([time, text], index) => <Marker key={time}><MarkerIcon>{index === 2 ? <AlertTriangle className="text-destructive" /> : <Activity />}</MarkerIcon><MarkerContent><span className="block font-medium text-foreground">{text}</span><span className="text-xs">{time}</span></MarkerContent></Marker>)}</CardContent></Card></div></div><ApprovalCard state={approvalState} onStateChange={setApprovalState} /></section>
+        <section className="min-w-0 space-y-5 p-4 sm:p-6"><div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-muted-foreground">{storedAlert ? "Live household incident" : "Example incident"}</p><h2 className="text-2xl font-semibold tracking-tight">{storedAlert?.title ?? "Possible fall in the living room"}</h2></div><Badge variant={resolved ? "secondary" : "destructive"}>{resolved ? "Resolved" : storedAlert ? "Action recommended" : "Demo evidence"}</Badge></div><div className="grid gap-5 2xl:grid-cols-[1.15fr_.85fr]"><EvidenceFrame kind="fall" /><div className="space-y-5"><Card className={cn(!resolved && "border-destructive/30")}><CardHeader><div className="flex items-start justify-between gap-3"><span className={cn("flex size-11 items-center justify-center rounded-2xl", resolved ? "bg-secondary" : "bg-destructive/10 text-destructive")}>{resolved ? <CircleCheck /> : <AlertTriangle />}</span><Badge variant={resolved ? "secondary" : "destructive"}>{resolved ? "Safe" : "Urgent"}</Badge></div><CardTitle className="text-2xl">{resolved ? "Keiko was marked safe" : alertState === "checking" ? "Yuki is checking now" : storedAlert?.title ?? "Possible fall — please check"}</CardTitle><CardDescription>{storedAlert?.message ?? "This is example evidence. Use the camera demo control to create a synthetic D1 alert."}</CardDescription></CardHeader><CardContent className="sticky bottom-4 flex flex-wrap gap-2 rounded-3xl border bg-background/95 p-2 shadow-md backdrop-blur sm:static sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none"><Button className="min-h-12 min-w-32 flex-1" disabled={resolved || !storedAlert} onClick={() => void updateAlert("checking")}><UserRound /> I’m checking</Button><Button className="min-h-12 min-w-32 flex-1" variant="outline" onClick={() => { window.location.href = "tel:+810000000001" }}><Phone /> Call Keiko</Button><Button className="min-h-12 min-w-32 flex-1" variant="secondary" disabled={resolved || !storedAlert} onClick={() => void updateAlert("resolved")}><CircleCheck /> Resolve</Button></CardContent></Card><Card><CardHeader><CardTitle>Detection timeline</CardTitle></CardHeader><CardContent className="space-y-4">{[["10:40:56", "Rapid posture change"], ["10:41:02", "Person remained low"], ["10:41:08", "TOMO asked if Keiko is okay"]].map(([time, text], index) => <Marker key={time}><MarkerIcon>{index === 2 ? <AlertTriangle className="text-destructive" /> : <Activity />}</MarkerIcon><MarkerContent><span className="block font-medium text-foreground">{text}</span><span className="text-xs">{time}</span></MarkerContent></Marker>)}</CardContent></Card></div></div><ApprovalCard approval={storedApproval} onResolved={() => setRefreshToken((value) => value + 1)} /></section>
       </div>
     </main>
   )
@@ -570,8 +723,47 @@ function TomoExperience() {
   const [role, setRole] = React.useState<Role>("patient")
   const [patientView, setPatientView] = React.useState<PatientView>("home")
   const [caregiverView, setCaregiverView] = React.useState<CaregiverView>("inbox")
-  const patientTurn = useDemoTurn()
-  const caregiverTurn = useDemoTurn()
+  const patientTurn = useDemoTurn("patient")
+  const caregiverTurn = useDemoTurn("caregiver")
+
+  React.useEffect(() => {
+    const id = householdId()
+    const seedKey = `tomo-demo-seeded-v2-${id}`
+    if (window.localStorage.getItem(seedKey)) return
+    const headers = { "Content-Type": "application/json", "x-tomo-household": id }
+    const memories = [
+      {
+        description: "Keiko's glasses are on the white table by the entrance. She left them there at 10:36 AM.",
+        objectLabels: ["glasses", "table"],
+        occurredAt: new Date().toISOString(),
+        bestFrameKey: "demo/glasses-memory.jpg",
+        boxes: [{ label: "Glasses", confidence: 0.96, x: 0.515, y: 0.615, width: 0.15, height: 0.11 }],
+        importance: "important",
+        provenance: "caregiver",
+      },
+      {
+        description: "Keiko is meeting Yuki today at 2:00 PM and should leave by 1:30 PM.",
+        objectLabels: ["schedule", "Yuki"],
+        occurredAt: new Date().toISOString(),
+        importance: "important",
+        provenance: "caregiver",
+      },
+      {
+        description: "Keiko said she takes her medicine at 8:00 PM. This must be confirmed by Yuki before it becomes trusted memory.",
+        objectLabels: ["medicine", "reminder"],
+        occurredAt: new Date().toISOString(),
+        importance: "safety",
+        provenance: "patient",
+      },
+    ]
+    void Promise.all(memories.map((memory) => fetch("/api/memories", {
+      method: "POST",
+      headers,
+      body: JSON.stringify(memory),
+    }))).then((responses) => {
+      if (responses.every((response) => response.ok)) window.localStorage.setItem(seedKey, "true")
+    }).catch(() => undefined)
+  }, [])
 
   function changeRole(nextRole: Role) {
     setRole(nextRole)

@@ -9,12 +9,12 @@ const figtree = Figtree({
 })
 
 export const metadata: Metadata = {
-  title: "Tomo",
-  description: "A privacy-first companion for independent living.",
+  title: "Tomo — A familiar voice. A trusted connection.",
+  description: "A privacy-first bilingual memory and safety companion for independent living and connected care.",
   icons: {
-    icon: [{ url: "/tomo-logo.png", type: "image/png", sizes: "512x512" }],
-    shortcut: "/tomo-logo.png",
-    apple: "/tomo-logo.png",
+    icon: [{ url: "/brand/mark-black-transparent.png", type: "image/png", sizes: "384x384" }],
+    shortcut: "/brand/mark-black-transparent.png",
+    apple: "/brand/mark-black-transparent.png",
   },
 }
 

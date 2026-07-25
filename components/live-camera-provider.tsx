@@ -23,6 +23,8 @@ type OrtModule = typeof import("onnxruntime-web")
 type LiveCameraContextValue = {
   detections: ObjectDetection[]
   demoFallActive: boolean
+  realFallActive: boolean
+  fallConfidence: number
   demoGlassesEnabled: boolean
   inferenceMs: number
   state: CameraState
@@ -41,6 +43,7 @@ const MOTION_WIDTH = 96
 const MOTION_HEIGHT = 54
 const TARGET_INFERENCE_INTERVAL_MS = 220
 const MODEL_PATH = "/yolo26n.onnx"
+const FALL_MODEL_PATH = "/memoria-fall.onnx"
 const ORT_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/"
 
 const COCO_LABELS = [
@@ -131,6 +134,7 @@ function prepareFrame(video: HTMLVideoElement, canvas: HTMLCanvasElement, ort: O
 function parseYoloOutput(
   values: Float32Array,
   frame: ReturnType<typeof prepareFrame>,
+  labels: readonly string[] = COCO_LABELS,
 ): ObjectDetection[] {
   const detections: ObjectDetection[] = []
   const rows = Math.floor(values.length / 6)
@@ -149,7 +153,7 @@ function parseYoloOutput(
 
     detections.push({
       id: `${classId}-${index}`,
-      label: COCO_LABELS[classId] ?? `object ${classId}`,
+      label: labels[classId] ?? `object ${classId}`,
       score,
       box: { x: x1, y: y1, width: x2 - x1, height: y2 - y1 },
     })
@@ -219,12 +223,15 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
   const [stream, setStream] = React.useState<MediaStream | null>(null)
   const [detections, setDetections] = React.useState<ObjectDetection[]>([])
   const [demoFallActive, setDemoFallActive] = React.useState(false)
+  const [realFallActive, setRealFallActive] = React.useState(false)
+  const [fallConfidence, setFallConfidence] = React.useState(0)
   const [demoGlassesEnabled, setDemoGlassesEnabled] = React.useState(true)
   const [state, setState] = React.useState<CameraState>("starting")
   const [runtime, setRuntime] = React.useState<Runtime>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [inferenceMs, setInferenceMs] = React.useState(0)
   const sessionRef = React.useRef<InferenceSession | null>(null)
+  const fallSessionRef = React.useRef<InferenceSession | null>(null)
   const ortRef = React.useRef<OrtModule | null>(null)
   const runtimeRef = React.useRef<Exclude<Runtime, null> | null>(null)
   const sourceVideoRef = React.useRef<HTMLVideoElement | null>(null)
@@ -246,6 +253,19 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       setDemoFallActive(false)
       demoFallTimerRef.current = null
     }, 12_000)
+    const householdId = window.localStorage.getItem("tomo-household-id")
+    if (householdId) {
+      void fetch("/api/alerts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
+        body: JSON.stringify({
+          type: "possible_fall",
+          severity: "urgent",
+          title: "Possible fall — demo",
+          message: "A synthetic possible-fall event was created from the camera demo control.",
+        }),
+      }).catch(() => undefined)
+    }
   }, [])
 
   const stopLoop = React.useCallback(() => {
@@ -254,7 +274,7 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     loopTimerRef.current = null
   }, [])
 
-  const startInference = React.useCallback((video: HTMLVideoElement, session: InferenceSession, ort: OrtModule) => {
+  const startInference = React.useCallback((video: HTMLVideoElement, session: InferenceSession, fallSession: InferenceSession | null, ort: OrtModule) => {
     stopLoop()
     runningRef.current = true
     const canvas = document.createElement("canvas")
@@ -267,6 +287,9 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     let previousLuma: Uint8Array | null = null
     let heldObjectBox: ObjectDetection["box"] | null = null
     let heldObjectExpiresAt = 0
+    let lastFallInferenceAt = 0
+    let fallVotes: Array<{ fallen: boolean; confidence: number }> = []
+    let alertSent = false
 
     const detect = async () => {
       if (!runningRef.current) return
@@ -306,6 +329,40 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
             heldObjectBox = null
             setDetections(liveDetections)
           }
+
+          if (fallSession && performance.now() - lastFallInferenceAt >= 700) {
+            lastFallInferenceAt = performance.now()
+            const fallResults = await fallSession.run({ images: frame.tensor })
+            const fallOutput = fallResults[fallSession.outputNames[0]]
+            const postureDetections = parseYoloOutput(fallOutput.data as Float32Array, frame, ["fallen", "not fallen"])
+            const fallen = postureDetections.filter((detection) => detection.label === "fallen").sort((left, right) => right.score - left.score)[0]
+            fallVotes = [...fallVotes, { fallen: Boolean(fallen), confidence: fallen?.score ?? 0 }].slice(-5)
+            const positiveVotes = fallVotes.filter((vote) => vote.fallen)
+            const confirmed = fallVotes.length >= 4 && positiveVotes.length >= 3
+            const confidence = positiveVotes.length
+              ? positiveVotes.reduce((total, vote) => total + vote.confidence, 0) / positiveVotes.length
+              : 0
+            setFallConfidence(confidence)
+            setRealFallActive(confirmed)
+
+            if (confirmed && !alertSent) {
+              alertSent = true
+              const householdId = window.localStorage.getItem("tomo-household-id")
+              if (householdId) {
+                void fetch("/api/alerts", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
+                  body: JSON.stringify({
+                    type: "possible_fall",
+                    severity: "urgent",
+                    title: "Possible fall — please check",
+                    message: `The local temporal fall model detected a sustained fall-like posture (${Math.round(confidence * 100)}% raw confidence).`,
+                  }),
+                }).catch(() => undefined)
+              }
+            }
+            if (!confirmed && positiveVotes.length === 0) alertSent = false
+          }
           setInferenceMs(Math.round(performance.now() - startedAt))
           setState("live")
           setError(null)
@@ -339,8 +396,10 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     setError(null)
     setState("starting")
 
+    let cameraStream: MediaStream
+
     try {
-      const cameraPromise = navigator.mediaDevices.getUserMedia({
+      cameraStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
           facingMode: { ideal: "environment" },
@@ -349,16 +408,6 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
           frameRate: { ideal: 24, max: 30 },
         },
       })
-      const detectorPromise = sessionRef.current && ortRef.current
-        ? Promise.resolve({ ort: ortRef.current, session: sessionRef.current, runtime: runtimeRef.current ?? "WebAssembly" as const })
-        : createYoloSession()
-
-      setState("loading-model")
-      const [cameraStream, detector] = await Promise.all([cameraPromise, detectorPromise])
-      sessionRef.current = detector.session
-      ortRef.current = detector.ort
-      runtimeRef.current = detector.runtime
-      setRuntime(detector.runtime)
       streamRef.current = cameraStream
       setStream(cameraStream)
 
@@ -369,12 +418,45 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       sourceVideo.srcObject = cameraStream
       sourceVideoRef.current = sourceVideo
       await sourceVideo.play()
-      startInference(sourceVideo, detector.session, detector.ort)
     } catch (cameraError) {
-      console.error("Camera or YOLO startup failed", cameraError)
+      console.error("Camera startup failed", cameraError)
       const message = readableCameraError(cameraError)
       setState(cameraError instanceof DOMException && cameraError.name === "NotAllowedError" ? "blocked" : "error")
       setError(message)
+      return
+    }
+
+    setState("loading-model")
+
+    try {
+      const detector = sessionRef.current && ortRef.current
+        ? { ort: ortRef.current, session: sessionRef.current, runtime: runtimeRef.current ?? "WebAssembly" as const }
+        : await createYoloSession()
+
+      sessionRef.current = detector.session
+      ortRef.current = detector.ort
+      runtimeRef.current = detector.runtime
+      setRuntime(detector.runtime)
+
+      let fallSession = fallSessionRef.current
+      if (!fallSession) {
+        try {
+          fallSession = await detector.ort.InferenceSession.create(FALL_MODEL_PATH, {
+            executionProviders: [detector.runtime === "WebGPU" ? "webgpu" : "wasm"],
+            graphOptimizationLevel: "all",
+          })
+          fallSessionRef.current = fallSession
+        } catch (fallModelError) {
+          console.error("Fall model startup failed; continuing with object detection", fallModelError)
+        }
+      }
+
+      if (!sourceVideoRef.current) throw new Error("Camera video was interrupted before analysis could start.")
+      startInference(sourceVideoRef.current, detector.session, fallSession, detector.ort)
+    } catch (detectorError) {
+      console.error("YOLO startup failed", detectorError)
+      setState("error")
+      setError("The camera is live, but local object detection could not start. Check the connection and retry analysis.")
     }
   }, [startInference, stopLoop])
 
@@ -389,13 +471,15 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       sourceVideoRef.current = null
       canvasRef.current = null
       void sessionRef.current?.release()
+      void fallSessionRef.current?.release()
       sessionRef.current = null
+      fallSessionRef.current = null
       ortRef.current = null
       runtimeRef.current = null
     }
   }, [start, stopLoop])
 
-  const value = React.useMemo<LiveCameraContextValue>(() => ({ detections, demoFallActive, demoGlassesEnabled, inferenceMs, state, runtime, error, stream, setDemoGlassesEnabled, simulateFall, retry: start }), [demoFallActive, demoGlassesEnabled, detections, error, inferenceMs, runtime, simulateFall, start, state, stream])
+  const value = React.useMemo<LiveCameraContextValue>(() => ({ detections, demoFallActive, realFallActive, fallConfidence, demoGlassesEnabled, inferenceMs, state, runtime, error, stream, setDemoGlassesEnabled, simulateFall, retry: start }), [demoFallActive, demoGlassesEnabled, detections, error, fallConfidence, inferenceMs, realFallActive, runtime, simulateFall, start, state, stream])
   return <LiveCameraContext.Provider value={value}>{children}</LiveCameraContext.Provider>
 }
 
@@ -406,7 +490,7 @@ export function useLiveCamera() {
 }
 
 export function LiveCameraView({ className, compact = false }: { className?: string; compact?: boolean }) {
-  const { demoFallActive, demoGlassesEnabled, detections, error, inferenceMs, retry, runtime, state, stream } = useLiveCamera()
+  const { demoFallActive, realFallActive, fallConfidence, demoGlassesEnabled, detections, error, inferenceMs, retry, runtime, state, stream } = useLiveCamera()
   const videoRef = React.useRef<HTMLVideoElement | null>(null)
   const [videoSize, setVideoSize] = React.useState({ width: 1280, height: 720 })
 
@@ -462,7 +546,14 @@ export function LiveCameraView({ className, compact = false }: { className?: str
         </div>
       )}
 
-      {hasVideo && detections.length === 0 && (
+      {hasVideo && state === "error" && (
+        <div className="absolute inset-x-3 bottom-3 flex items-center justify-center gap-2">
+          <Badge variant="destructive" className="max-w-[70%] truncate">{error ?? "Local analysis paused"}</Badge>
+          <Button size="sm" variant="secondary" onClick={() => void retry()}><RefreshCw /> Retry</Button>
+        </div>
+      )}
+
+      {hasVideo && state !== "error" && detections.length === 0 && (
         <div className="absolute inset-x-3 bottom-3 flex justify-center">
           <Badge variant="secondary" className="bg-background/90 backdrop-blur">Scanning for objects…</Badge>
         </div>
@@ -474,9 +565,9 @@ export function LiveCameraView({ className, compact = false }: { className?: str
         </div>
       )}
 
-      {hasVideo && demoFallActive && (
+      {hasVideo && (realFallActive || demoFallActive) && (
         <div className="absolute inset-x-3 bottom-3 flex justify-center" role="alert">
-          <Badge variant="destructive" className="px-3 py-1.5">Possible fall · Demo</Badge>
+          <Badge variant="destructive" className="px-3 py-1.5">{realFallActive ? `Possible fall · ${Math.round(fallConfidence * 100)}% · Local model` : "Possible fall · Demo"}</Badge>
         </div>
       )}
     </div>

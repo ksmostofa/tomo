@@ -1,0 +1,15 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "tomo-memoria",
+  "pages_build_output_dir": "./dist/client",
+  "compatibility_date": "2026-07-25",
+  "compatibility_flags": ["nodejs_compat"],
+  "ai": { "binding": "AI" },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "tomo-memoria-db",
+      "database_id": "7a70b4de-2534-43e4-a573-92982fcbe44b"
+    }
+  ]
+}

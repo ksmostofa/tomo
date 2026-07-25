@@ -1,0 +1,32 @@
+sequenceDiagram
+  autonumber
+  participant Camera as Patient camera
+  participant Local as Local vision pipeline
+  participant API as Cloudflare Worker
+  participant Memory as D1 + R2
+  participant AI as Typed AI adapter
+  participant Patient as Patient UI
+  participant Caregiver as Caregiver UI
+
+  Camera->>Local: Continuous frames
+  Local->>Local: Motion gate, detect, track
+  alt No meaningful movement
+    Local-->>Local: Delete temporary frames
+  else Important object event
+    Local->>API: Five-second event + selected evidence
+    API->>AI: Describe and embed approved evidence
+    AI-->>API: Structured description + embedding
+    API->>Memory: Store facts, frame key, boxes, provenance
+  else Possible fall
+    Local->>API: Immediate possible-fall event
+    API->>Memory: Persist incident and evidence
+    API-->>Caregiver: Alert with review actions
+  end
+  Patient->>API: Voice or typed question
+  API->>Memory: Hybrid semantic search
+  Memory-->>API: Ranked memories + supporting frame
+  API->>AI: Grounded bilingual response
+  AI-->>API: Answer + speech
+  API-->>Patient: Text, voice, frame, and object box
+  Caregiver->>API: Approve, edit, reject, or resolve
+  API->>Memory: Update trusted state and audit trail

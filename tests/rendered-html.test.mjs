@@ -1,87 +1,64 @@
-import assert from "node:assert/strict";
-import { access, readFile, readdir } from "node:fs/promises";
-import test from "node:test";
+import assert from "node:assert/strict"
+import { access, readFile, stat } from "node:fs/promises"
+import test from "node:test"
 
-const developmentPreviewMeta =
-  /<meta(?=[^>]*\bname=["']codex-preview["'])(?=[^>]*\bcontent=["']development["'])[^>]*>/i;
-const templateRoot = new URL("../", import.meta.url);
-const previewRoot = new URL("../app/_sites-preview/", import.meta.url);
+const root = new URL("../", import.meta.url)
 
-async function render() {
-  const workerUrl = new URL("../dist/server/index.js", import.meta.url);
-  workerUrl.searchParams.set("test", `${process.pid}-${Date.now()}`);
-  const { default: worker } = await import(workerUrl.href);
-
-  return worker.fetch(
-    new Request("http://localhost/", {
-      headers: { accept: "text/html" },
-    }),
-    {
-      ASSETS: {
-        fetch: async () => new Response("Not found", { status: 404 }),
-      },
-    },
-    {
-      waitUntil() {},
-      passThroughOnException() {},
-    },
-  );
+async function source(path) {
+  return readFile(new URL(path, root), "utf8")
 }
 
-test("server-renders the starter loading skeleton", async () => {
-  const response = await render();
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^text\/html\b/i);
+test("ships the patient and caregiver experience with the approved language", async () => {
+  const [layout, ui] = await Promise.all([
+    source("app/layout.tsx"),
+    source("components/tomo-ui-prototype.tsx"),
+  ])
 
-  const html = await response.text();
-  assert.match(html, developmentPreviewMeta);
-  assert.match(html, /<title>Your site is taking shape<\/title>/i);
-  assert.match(html, /Codex is working/);
-  assert.match(html, /Your site is taking shape/);
-  assert.match(html, /Codex is building the first version/);
-  assert.match(html, /react-loading-skeleton/);
-  assert.match(html, /role="status"/);
-});
+  assert.match(layout, /Tomo — A familiar voice\. A trusted connection\./)
+  assert.match(ui, /What can I help you remember\?/)
+  assert.match(ui, /English or Japanese is okay/)
+  assert.match(ui, /Call Yuki/)
+  assert.match(ui, /Care inbox/)
+  assert.match(ui, /Possible fall — please check/)
+})
 
-test("keeps the loading skeleton scoped and disposable", async () => {
-  const [preview, css, page, layout, packageJson, files] = await Promise.all([
-    readFile(new URL("SkeletonPreview.tsx", previewRoot), "utf8"),
-    readFile(new URL("preview.css", previewRoot), "utf8"),
-    readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../app/layout.tsx", import.meta.url), "utf8"),
-    readFile(new URL("../package.json", import.meta.url), "utf8"),
-    readdir(previewRoot),
-  ]);
+test("keeps perception local and includes both detector artifacts", async () => {
+  const camera = await source("components/live-camera-provider.tsx")
+  const [objectModel, fallModel] = await Promise.all([
+    stat(new URL("public/yolo26n.onnx", root)),
+    stat(new URL("public/memoria-fall.onnx", root)),
+  ])
 
-  assert.deepEqual(files.sort(), ["SkeletonPreview.tsx", "preview.css"]);
-  assert.match(preview, /from "react-loading-skeleton"/);
-  assert.match(preview, /baseColor="#eceae7"/);
-  assert.match(preview, /highlightColor="#f9f8f6"/);
-  assert.match(preview, /duration=\{2\.8\}/);
-  assert.match(preview, /sites-skeleton-search-placeholder/);
-  assert.match(packageJson, /"react-loading-skeleton": "3\.5\.0"/);
+  assert.match(camera, /onnxruntime-web/)
+  assert.match(camera, /yolo26n\.onnx/)
+  assert.match(camera, /memoria-fall\.onnx/)
+  assert.match(camera, /3-of-5|positiveVotes\.length >= 3/)
+  assert.ok(objectModel.size > 1_000_000)
+  assert.ok(fallModel.size > 1_000_000)
+})
 
-  const shellIndex = preview.indexOf('className="sites-skeleton-shell"');
-  const statusIndex = preview.indexOf('className="sites-skeleton-status"');
-  assert.ok(shellIndex >= 0 && statusIndex > shellIndex);
-  assert.match(css, /position:\s*fixed/);
-  assert.match(css, /inset:\s*0/);
-  assert.match(css, /opacity:\s*0\.52/);
-  assert.match(css, /prefers-reduced-motion:\s*reduce/);
-  assert.doesNotMatch(css, /#020617|canvas|pets|progress/i);
-  assert.doesNotMatch(
-    preview,
-    /loading-spinner|status-mark|status-progress|canvas|cookie|random/i,
-  );
+test("includes D1-backed API routes and a reproducible Pages build", async () => {
+  const [pagesConfig, packageJson] = await Promise.all([
+    source("wrangler.jsonc"),
+    source("package.json"),
+  ])
 
-  assert.match(page, /export const metadata:\s*Metadata/);
-  assert.match(page, /"codex-preview": "development"/);
-  assert.match(page, /<SkeletonPreview \/>/);
-  assert.match(layout, /title:\s*"Starter Project"/);
-  assert.doesNotMatch(layout, /codex-preview|_sites-preview|themeColor|\bViewport\b/);
-  assert.doesNotMatch(css, /(^|\s)(html|body)\s*\{/m);
+  assert.match(pagesConfig, /"pages_build_output_dir"/)
+  assert.match(pagesConfig, /"binding": "DB"/)
+  assert.match(pagesConfig, /"binding": "AI"/)
+  assert.match(packageJson, /"build:pages"/)
 
-  await assert.rejects(
-    access(new URL("public/_sites-preview", templateRoot)),
-  );
-});
+  await Promise.all([
+    access(new URL("app/api/chat/route.ts", root)),
+    access(new URL("app/api/memories/route.ts", root)),
+    access(new URL("app/api/alerts/route.ts", root)),
+    access(new URL("app/api/alerts/[id]/route.ts", root)),
+    access(new URL("app/api/approvals/route.ts", root)),
+    access(new URL("app/api/weather/route.ts", root)),
+  ])
+})
+
+test("does not publish private execution plans", async () => {
+  await assert.rejects(access(new URL("outputs/tomo-execution-plan.md", root)))
+  await assert.rejects(access(new URL("tomo-final-project-plan.md", root)))
+})

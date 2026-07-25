@@ -12,10 +12,12 @@
   A privacy-first, voice-first memory and safety companion for older adults and their care circle.
 
   [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org/)
-  [![Cloudflare](https://img.shields.io/badge/Cloudflare-Workers%20%2B%20D1%20%2B%20R2-F38020?logo=cloudflare&logoColor=white)](https://www.cloudflare.com/)
+  [![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1%20%2B%20Workers%20AI-F38020?logo=cloudflare&logoColor=white)](https://tomo-memoria.pages.dev)
   [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 </div>
+
+**Live application:** [tomo-memoria.pages.dev](https://tomo-memoria.pages.dev) · **API health:** [tomo-memoria.pages.dev/api/health](https://tomo-memoria.pages.dev/api/health)
 
 ## What TOMO does
 
@@ -92,7 +94,7 @@ flowchart LR
   EVENT -->|Consent + minimum evidence| API
 
   subgraph PROVIDERS["Typed provider adapters"]
-    QWEN["Qwen Cloud<br/>chat, vision, embeddings, ASR/TTS"]
+    QWEN["Qwen provider adapter<br/>Cloudflare-hosted Qwen or Qwen Cloud"]
     AIAND["ai&amp;<br/>private Japanese reasoning"]
     NOSANA["Nosana<br/>specialized GPU inference"]
     GMI["GMI Cloud<br/>high-severity second opinion"]
@@ -197,21 +199,23 @@ Routine, no-motion footage expires locally. Evidence uploads use short retention
 | Local vision | YOLO26n ONNX, ONNX Runtime Web | Live object boxes with WebGPU/WASM fallback |
 | Fall analysis | Specialized fall model + temporal tracker | Conservative possible-fall events |
 | Structured storage | Cloudflare D1, Drizzle ORM | Memories, alerts, approvals, schedule, audit |
-| Evidence storage | Cloudflare R2 | Best frames and short event clips |
-| Semantic memory | Qwen embeddings + hybrid search | English/Japanese evidence retrieval |
-| Voice | Typed realtime ASR/TTS provider adapter | Bilingual streaming conversation and fallback |
-| Deployment | Cloudflare Sites/Workers + GitHub | Public HTTPS delivery and reproducible source |
+| Evidence storage | Cloudflare R2 adapter | Private best frames and short event clips when the binding is enabled |
+| Semantic memory | Qwen embeddings + D1 hybrid ranking | English/Japanese evidence retrieval |
+| Voice | Browser Web Speech + typed provider boundary | Bilingual ASR/TTS with typed-chat fallback |
+| Deployment | Cloudflare Pages advanced mode + GitHub | Public HTTPS UI and edge API |
 
-## Sponsor tools — used only where they belong
+## Sponsor tools — honest integration status
 
-| Tool | Role | Runtime requirement |
+| Tool | Intended role | Current status |
 |---|---|---|
-| **Qwen Cloud** | Primary chat, vision confirmation, embeddings, English/Japanese ASR and TTS | Core provider adapter |
-| **ai&** | Privacy-sensitive Japanese reasoning and patient-safe phrasing | Optional adapter |
-| **Nosana** | Specialized/custom YOLO and pose processing when local hardware is insufficient | Optional GPU lane |
-| **GMI Cloud** | Independent review of ambiguous high-severity evidence; never cancels a deterministic alert | Optional second opinion |
-| **Daytona** | Isolated retrieval of allowlisted live information such as weather | Optional context sandbox |
-| **Qoder** | Architecture review, Repo Wiki, implementation and test support | Development only |
+| **Qwen Cloud** | Direct hosted Qwen chat and embeddings through the typed OpenAI-compatible adapter | Adapter implemented; disabled until `DASHSCOPE_API_KEY` and `QWEN_BASE_URL` are supplied |
+| **ai&** | Privacy-sensitive Japanese reasoning and patient-safe phrasing | Not configured; optional |
+| **Nosana** | Specialized/custom model inference when local hardware is insufficient | Not configured; optional |
+| **GMI Cloud** | Independent review of ambiguous high-severity evidence | Not configured; optional |
+| **Daytona** | Isolated retrieval of allowlisted live information | Not configured; weather currently uses Open-Meteo directly |
+| **Qoder** | Architecture review, Repo Wiki, implementation and test support | Development-only tool; not a runtime dependency |
+
+The deployed application currently runs Qwen chat and embeddings through the **Cloudflare Workers AI binding** (`@cf/qwen/qwen3-30b-a3b-fp8` and `@cf/qwen/qwen3-embedding-0.6b`). This is a real Qwen integration, but it is not presented as the Qwen Cloud sponsor API. If Qwen Cloud credentials are added, the same adapter prefers them without changing route contracts.
 
 Provider failures are explicit and recoverable. TOMO must retain typed-chat fallback, local safety behavior, and durable outbox state when a provider is unavailable.
 
@@ -229,7 +233,8 @@ public/
   brand/                     TOMO light/dark logo assets
   yolo26n.onnx               Local object detector
 worker/                      Cloudflare Worker entry point
-.openai/hosting.json         Cloudflare D1/R2 binding declaration
+scripts/prepare-pages.mjs    Reproducible Pages advanced-mode bundle
+wrangler.jsonc               Pages, D1, and Workers AI bindings
 tests/                       Build and rendered-output checks
 ```
 
@@ -239,16 +244,20 @@ This repository is under active construction. The README describes the approved 
 
 | Capability | Status |
 |---|---|
+| Native Cloudflare Pages deployment | **Live** |
 | Patient and caregiver responsive UI | Working prototype |
 | Strict shadcn `b1VlIugq` design system | Working |
 | Persistent camera while minimized | Working |
 | Live YOLO26n labels and bounding boxes | Working locally |
-| English/Japanese UI affordances | Working prototype |
-| Temporal fall model and alert trigger | In progress |
-| Motion-gated five-second event capture | In progress |
-| D1/R2 semantic memory | Planned integration |
-| Qwen chat, vision, embeddings and voice | Planned integration |
-| Email and caregiver notification delivery | Planned integration |
+| English/Japanese browser speech input/output | Working on compatible browsers |
+| Temporal Project Memoria fall model and D1 alert trigger | Working locally; conservative 3-of-5 vote |
+| Motion-gated five-second event capture | Not complete |
+| D1 structured + hybrid semantic memory | **Live** |
+| D1 fall-alert status and caregiver approval workflow | **Live** |
+| Cloudflare-hosted Qwen chat and embeddings | **Live** |
+| Qwen Cloud sponsor API | Adapter ready; credentials unavailable |
+| R2 evidence upload | Adapter ready; account subscription/binding not enabled |
+| Email delivery | Adapter ready; sender credentials unavailable |
 | Authentication and household grants | Future production gate |
 
 Until authentication is added, public testing must use synthetic/demo information only. Browser-generated guest household IDs will isolate test sessions; they are not a substitute for identity or authorization.
@@ -291,22 +300,28 @@ Use shadcn components, semantic theme tokens, CSS transitions, and accessible HT
 
 ## Cloudflare deployment
 
-1. Create a Cloudflare site/project.
-2. Bind D1 as `DB` and R2 as `EVIDENCE` in `.openai/hosting.json`.
-3. Apply generated Drizzle migrations.
-4. Add provider credentials as encrypted deployment secrets—never `.env` files committed to Git.
-5. Build and deploy from the pinned GitHub commit.
-6. Verify camera access on the production HTTPS URL, provider health, guest isolation, and evidence retention.
+The checked-in `wrangler.jsonc` targets the existing TOMO resources. For a fork, create your own D1 database and replace its ID:
+
+```bash
+pnpm install
+pnpm exec wrangler login
+pnpm exec wrangler d1 create tomo-memoria-db
+# Copy the returned database_id into wrangler.jsonc.
+pnpm exec wrangler d1 execute tomo-memoria-db --remote --file=drizzle/0000_naive_zarek.sql
+pnpm deploy:pages
+```
+
+To enable private evidence, first enable R2 in the Cloudflare account, create `tomo-memoria-evidence`, then add an `r2_buckets` binding named `EVIDENCE` to `wrangler.jsonc`. Add secrets with `wrangler pages secret put`; never commit them. Verify `/api/health`, the camera on HTTPS, guest isolation, and evidence retention after each deployment.
 
 Target environment names:
 
 ```text
 DASHSCOPE_API_KEY
 QWEN_BASE_URL
-QWEN_TEXT_MODEL
-QWEN_VISION_MODEL
-QWEN_EMBED_MODEL
-ALERT_EMAIL_FROM
+QWEN_CHAT_MODEL
+QWEN_EMBEDDING_MODEL
+RESEND_API_KEY
+EMAIL_FROM
 CAREGIVER_EMAIL
 ```
 
