@@ -5,6 +5,7 @@
 // Caregiver starts in the evidence-focused care inbox and can open Ask TOMO.
 
 import * as React from "react"
+import Image from "next/image"
 import {
   Activity,
   AlertTriangle,
@@ -79,6 +80,7 @@ import {
 import { Progress } from "@/components/ui/progress"
 import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
+import { Switch } from "@/components/ui/switch"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
 import { LiveCameraProvider, LiveCameraView, useLiveCamera } from "@/components/live-camera-provider"
@@ -236,16 +238,26 @@ function LiveCameraPanel() {
 }
 
 function LocalAnalysisCard() {
-  const { detections, inferenceMs, runtime, state } = useLiveCamera()
+  const { demoFallActive, demoGlassesEnabled, detections, inferenceMs, runtime, setDemoGlassesEnabled, simulateFall, state } = useLiveCamera()
   return (
     <Card>
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle>Live local analysis</CardTitle><CardDescription>{state === "live" ? `${detections.length} objects in the latest frame` : "Detector is starting"}</CardDescription></div><Badge variant="secondary"><ShieldCheck /> Local only</Badge></CardHeader>
       <CardContent className="space-y-1">
         <StatusRow icon={<Search />} label="YOLO26n object recognition" detail={state === "live" ? `${runtime} · ${inferenceMs || "—"} ms · ${detections.length} detected` : "Loading model and camera"} />
         <Separator />
-        <StatusRow icon={<Activity />} label="Fall detection" detail="Active · temporal posture checks" />
+        <StatusRow icon={<Activity />} label="Fall workflow" detail={demoFallActive ? "Possible fall demo is active" : "Demo trigger ready · real model integration follows deployment"} />
         <Separator />
         <StatusRow icon={<Clock3 />} label="Temporary video buffer" detail="Recent seconds in device memory only" />
+        <Separator />
+        <div className="space-y-3 pt-3">
+          <div className="flex items-center justify-between gap-3">
+            <div><p className="text-sm font-medium">Demo glasses mapping</p><p className="text-xs text-muted-foreground">Relabels the strongest held object as glasses</p></div>
+            <Switch checked={demoGlassesEnabled} onCheckedChange={setDemoGlassesEnabled} aria-label="Toggle demo glasses mapping" />
+          </div>
+          <Button type="button" variant={demoFallActive ? "destructive" : "outline"} className="w-full" onClick={simulateFall}>
+            <AlertTriangle /> {demoFallActive ? "Possible fall demo active" : "Simulate possible fall"}
+          </Button>
+        </div>
       </CardContent>
     </Card>
   )
@@ -276,7 +288,7 @@ function VoiceOrb({ state, onActivate, size = "large" }: { state: VoiceState; on
 function TodayCard() {
   return (
     <Card size="sm">
-      <CardContent className="flex items-center gap-3"><span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground"><CalendarDays className="size-5" /></span><div className="min-w-0 flex-1"><p className="font-medium">Community centre with Tanaka-san</p><p className="text-sm text-muted-foreground">Today at 2:00 PM · Leave by 1:35</p></div><ChevronRight className="size-4 text-muted-foreground" /></CardContent>
+      <CardContent className="flex items-center gap-3"><span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground"><CalendarDays className="size-5" /></span><div className="min-w-0 flex-1"><p className="font-medium">Meet Yuki</p><p className="text-sm text-muted-foreground">Today at 2:00 PM · Leave by 1:30</p></div><ChevronRight className="size-4 text-muted-foreground" /></CardContent>
     </Card>
   )
 }
@@ -313,13 +325,13 @@ function PatientHome({ role, onRoleChange, onAsk, onOpenChat }: { role: Role; on
     if (voiceState === "listening") {
       if (voiceTimer.current) window.clearTimeout(voiceTimer.current)
       setVoiceState("ready")
-      onAsk("Where are my glasses? I think I have somewhere to go.")
+      onAsk("Where are my glasses? I want to go outside.")
       return
     }
     setVoiceState("listening")
     voiceTimer.current = window.setTimeout(() => {
       setVoiceState("ready")
-      onAsk("Where are my glasses? I think I have somewhere to go.")
+      onAsk("Where are my glasses? I want to go outside.")
     }, 1200)
   }
 
@@ -341,19 +353,80 @@ function EvidenceFrame({ kind = "object" }: { kind?: "object" | "fall" }) {
   const isFall = kind === "fall"
   return (
     <Card size="sm" className={cn("w-full", isFall && "border-destructive/30")}>
-      <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div className="min-w-0 flex-1"><CardTitle>{isFall ? "Living-room photo proof" : "Retrieved photo proof"}</CardTitle><CardDescription>{isFall ? "10:41:08 · Shared for safety review" : "Entrance · 10:36 · Six minutes ago"}</CardDescription></div><Badge className="shrink-0" variant={isFall ? "destructive" : "secondary"}><Camera /> Evidence</Badge></CardHeader>
+      <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div className="min-w-0 flex-1"><CardTitle>{isFall ? "Living-room photo proof" : "Retrieved photo proof"}</CardTitle><CardDescription>{isFall ? "10:41:08 · Shared for safety review" : "White table · Latest trusted frame"}</CardDescription></div><Badge className="shrink-0" variant={isFall ? "destructive" : "secondary"}><Camera /> Evidence</Badge></CardHeader>
       <CardContent>
-        <div className="flex aspect-video min-h-52 items-center justify-center rounded-3xl bg-muted/50 p-6">
-          <Card size="sm" className={cn("min-w-48 border-2 bg-background", isFall ? "border-destructive" : "border-primary")}>
-            <CardContent className="flex flex-col items-center text-center">
-              {isFall ? <UserRound className="size-8" /> : <Glasses className="size-8" />}
-              <Badge className="mt-3" variant={isFall ? "destructive" : "default"}>{isFall ? "Person low · 82%" : "Glasses · 91%"}</Badge>
-              <p className="mt-2 text-xs text-muted-foreground">{isFall ? "12 seconds without movement" : "On the entrance table"}</p>
-            </CardContent>
-          </Card>
-        </div>
+        {isFall ? (
+          <div className="relative aspect-video min-h-52 overflow-hidden rounded-3xl bg-muted">
+            <Image
+              src="/fall-memory.jpg"
+              alt="Fall detection camera frame showing a person seated low on the floor"
+              width={4032}
+              height={2268}
+              unoptimized
+              className="size-full object-cover"
+            />
+            <div
+              className="absolute border-2 border-destructive bg-destructive/5 shadow-[0_0_0_1px_rgba(255,255,255,.8)]"
+              style={{ left: "40%", top: "37%", width: "36%", height: "59%" }}
+              aria-label="Possible fall detected around the person"
+            >
+              <Badge className="absolute -top-7 left-0 whitespace-nowrap" variant="destructive">
+                <AlertTriangle /> Possible fall · 82%
+              </Badge>
+            </div>
+          </div>
+        ) : (
+          <div className="relative aspect-video min-h-52 overflow-hidden rounded-3xl bg-muted">
+            <Image
+              src="/glasses-memory.jpg"
+              alt="Retrieved camera frame showing the glasses on a white table"
+              width={4032}
+              height={2268}
+              unoptimized
+              className="size-full object-cover"
+            />
+            <div
+              className="absolute border-2 border-primary bg-primary/5 shadow-[0_0_0_1px_rgba(255,255,255,.8)]"
+              style={{ left: "51.5%", top: "61.5%", width: "15%", height: "11%" }}
+              aria-label="Glasses detected on the white table"
+            >
+              <Badge className="absolute -top-7 left-0 whitespace-nowrap"><Glasses /> Glasses · 96%</Badge>
+            </div>
+          </div>
+        )}
       </CardContent>
     </Card>
+  )
+}
+
+function GlassesMockAnswer() {
+  return (
+    <>
+      <p>Your glasses are on the white table in front of you.</p>
+      <EvidenceFrame />
+      <Card size="sm">
+        <CardContent className="flex items-start gap-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-2xl bg-muted"><CloudSun className="size-5" /></span>
+          <div><p className="font-medium">It’s 32°C and hot outside.</p><p className="mt-1 text-sm text-muted-foreground">Please take a water bottle with you.</p></div>
+        </CardContent>
+      </Card>
+    </>
+  )
+}
+
+function TodayMockAnswer() {
+  return (
+    <>
+      <p>You’re meeting Yuki today at 2:00 PM.</p>
+      <Card size="sm">
+        <CardContent className="flex items-center gap-3">
+          <span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-muted"><CalendarDays className="size-5" /></span>
+          <div className="min-w-0 flex-1"><p className="font-medium">Meet Yuki</p><p className="text-sm text-muted-foreground">Today at 2:00 PM · Leave by 1:30 PM</p></div>
+          <Badge variant="secondary">Today</Badge>
+        </CardContent>
+      </Card>
+      <p className="text-sm text-muted-foreground">I’ll remind you again before it’s time to leave.</p>
+    </>
   )
 }
 
@@ -410,6 +483,7 @@ function ChatComposer({ placeholder, onSubmit, patient = false }: { placeholder:
 function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: DemoTurn; onBack: () => void }) {
   const caregiverSaved = audience === "caregiver" && turn.query.toLowerCase().includes("remember")
   const caregiverFallQuery = audience === "caregiver" && /fall|incident|happened|before/.test(turn.query.toLowerCase())
+  const patientScheduleQuery = audience === "patient" && /what.*today|do today|schedule|plans|have to do/.test(turn.query.toLowerCase())
 
   return (
     <div className="flex min-h-dvh flex-col bg-muted/30">
@@ -417,6 +491,9 @@ function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: DemoT
       <div className="mx-auto flex min-h-0 w-full max-w-5xl flex-1 flex-col px-3 py-4 sm:px-6">
         {audience === "caregiver" && turn.stage === "idle" && (
           <div className="mb-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => turn.start("What happened immediately before the fall?")}><Search /> Find event context</Button><Button variant="outline" onClick={() => turn.start("Remember that Keiko’s blue folder is in the hallway drawer.")}><Database /> Add trusted memory</Button><Button variant="outline" onClick={() => turn.start("Where did Keiko leave her glasses?")}><Glasses /> Find an object</Button></div>
+        )}
+        {audience === "patient" && turn.stage === "idle" && (
+          <div className="mb-4 flex flex-wrap gap-2"><Button variant="outline" onClick={() => turn.start("Where are my glasses? I want to go outside.")}><Glasses /> Find my glasses</Button><Button variant="outline" onClick={() => turn.start("What do I have to do today?")}><CalendarDays /> What am I doing today?</Button></div>
         )}
         <Card className="min-h-0 flex-1 py-0">
           <MessageScrollerProvider autoScroll scrollPreviousItemPeek={64}>
@@ -438,7 +515,7 @@ function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: DemoT
                   {turn.stage === "done" && (
                     <MessageScrollerItem messageId="answer" scrollAnchor>
                       <Message><MessageAvatar><TomoMark className="size-8" /></MessageAvatar><MessageContent><MessageHeader>TOMO</MessageHeader><Bubble variant="ghost" className="w-full"><BubbleContent className="w-full space-y-4 text-base">
-                        {caregiverSaved ? <><p>I saved this as a trusted caregiver memory: Keiko’s blue folder is in the hallway drawer.</p><Card size="sm"><CardContent className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-2xl bg-muted"><Database className="size-4" /></span><div><p className="font-medium">Memory added</p><p className="text-sm text-muted-foreground">Caregiver-provided · Semantically searchable</p></div><Badge variant="secondary" className="ml-auto"><Check /> Trusted</Badge></CardContent></Card></> : caregiverFallQuery ? <><p>Immediately before the alert, Keiko moved quickly beside the living-room chair and then remained low for 12 seconds.</p><EvidenceFrame kind="fall" /></> : <><p>Your glasses are on the entrance table. You left them there six minutes ago. You’re meeting Tanaka-san at 2:00 PM.</p><EvidenceFrame /></>}
+                        {caregiverSaved ? <><p>I saved this as a trusted caregiver memory: Keiko’s blue folder is in the hallway drawer.</p><Card size="sm"><CardContent className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-2xl bg-muted"><Database className="size-4" /></span><div><p className="font-medium">Memory added</p><p className="text-sm text-muted-foreground">Caregiver-provided · Semantically searchable</p></div><Badge variant="secondary" className="ml-auto"><Check /> Trusted</Badge></CardContent></Card></> : caregiverFallQuery ? <><p>Immediately before the alert, Keiko moved quickly beside the living-room chair and then remained low for 12 seconds.</p><EvidenceFrame kind="fall" /></> : patientScheduleQuery ? <TodayMockAnswer /> : <GlassesMockAnswer />}
                       </BubbleContent></Bubble><MessageFooter>{caregiverSaved ? "Saved with caregiver provenance" : "Grounded in the latest trusted memory and supporting frame"}</MessageFooter></MessageContent></Message>
                     </MessageScrollerItem>
                   )}
