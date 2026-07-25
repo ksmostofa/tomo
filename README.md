@@ -49,72 +49,104 @@ TOMO is assistive software, not a medical device. It reports a **possible fall**
 ## System design
 
 ```mermaid
-flowchart TB
-  subgraph DEVICE["Patient device — local and continuous"]
-    CAMERA["Camera + microphone"]
-    RING["Short in-memory ring buffer"]
-    MOTION["Motion gate"]
-    OBJECTS["YOLO26n object detection"]
-    SAFETY["Pose / fall model + temporal confirmation"]
-    TRACKER["Object and person tracker"]
-    SELECTOR["Important-event selector"]
-    UI["Patient voice + camera UI"]
+flowchart LR
+  subgraph DEVICE["Patient device - local and continuous"]
+    INPUT["Camera + microphone"]
+    BUFFER["Short in-memory ring buffer"]
+    GATE["Motion gate"]
+    VISION["YOLO26n + fall analysis"]
+    TRACK["Object and person tracking"]
+    SELECT["Important-event selector"]
+    OVERLAY["Live labels + voice UI"]
+    DELETE["Discard no-motion video"]
 
-    CAMERA --> RING
-    CAMERA --> MOTION
-    MOTION --> OBJECTS
-    MOTION --> SAFETY
-    OBJECTS --> TRACKER
-    SAFETY --> TRACKER
-    TRACKER --> SELECTOR
-    OBJECTS --> UI
-    SAFETY --> UI
+    INPUT --> BUFFER
+    INPUT --> GATE
+    GATE -->|Movement| VISION
+    GATE -->|No movement| DELETE
+    VISION --> TRACK
+    VISION --> OVERLAY
+    TRACK --> SELECT
   end
 
-  NO_EVENT["No meaningful movement\nDelete locally"]
-  EVENT["Five-second event package\nDescription · labels · time · best frame\nboxes · clip reference · confidence"]
+  EVENT["Five-second event package<br/>description, labels, timestamp,<br/>best frame, boxes, confidence"]
+  SELECT -->|Important or safety event| EVENT
 
-  MOTION -->|"No movement"| NO_EVENT
-  SELECTOR -->|"Important or safety event"| EVENT
-
-  subgraph CLOUDFLARE["Cloudflare — modular application"]
-    WORKER["Next.js / vinext Worker API"]
+  subgraph EDGE["Cloudflare application"]
+    API["Next.js / vinext Worker API"]
     D1[("D1 structured memory")]
     R2[("R2 private evidence")]
     SEARCH["Hybrid semantic retrieval"]
-    OUTBOX["Alert + approval outbox"]
-    WEATHER["Validated live context cache"]
+    OUTBOX["Alerts + approval outbox"]
+    CONTEXT["Validated live context cache"]
 
-    WORKER --> D1
-    WORKER --> R2
+    API --> D1
+    API --> R2
     D1 --> SEARCH
     R2 --> SEARCH
-    WORKER --> OUTBOX
-    WORKER --> WEATHER
+    API --> OUTBOX
+    API --> CONTEXT
+    SEARCH --> API
   end
 
-  EVENT -->|"Consent + minimum evidence"| WORKER
+  EVENT -->|Consent + minimum evidence| API
 
-  subgraph AI["Typed AI provider adapters"]
-    QWEN["Qwen Cloud\nchat · vision · embeddings · ASR/TTS"]
-    PRIVATE["ai&\nprivate Japanese reasoning"]
-    NOSANA["Nosana\nspecialized YOLO / pose jobs"]
-    GMI["GMI Cloud\nambiguous high-severity review"]
-    DAYTONA["Daytona\nisolated allowlisted live data"]
+  subgraph PROVIDERS["Typed provider adapters"]
+    QWEN["Qwen Cloud<br/>chat, vision, embeddings, ASR/TTS"]
+    AIAND["ai&amp;<br/>private Japanese reasoning"]
+    NOSANA["Nosana<br/>specialized GPU inference"]
+    GMI["GMI Cloud<br/>high-severity second opinion"]
+    DAYTONA["Daytona<br/>isolated live-data retrieval"]
   end
 
-  WORKER <--> QWEN
-  WORKER -. "optional" .-> PRIVATE
-  WORKER -. "optional" .-> NOSANA
-  WORKER -. "optional" .-> GMI
-  WEATHER -. "optional sandbox" .-> DAYTONA
+  API <--> QWEN
+  API -.->|Optional| AIAND
+  API -.->|Optional| NOSANA
+  API -.->|Optional| GMI
+  CONTEXT -.->|Optional sandbox| DAYTONA
 
-  CAREGIVER["Caregiver UI"]
-  PATIENT["Patient chat / voice"]
-  SEARCH --> WORKER
-  WORKER --> PATIENT
+  PATIENT["Patient chat + voice"]
+  CAREGIVER["Caregiver inbox + chat"]
+  PATIENT <--> API
+  CAREGIVER <--> API
   OUTBOX --> CAREGIVER
-  CAREGIVER -->|"Approve / resolve"| WORKER
+```
+
+### Runtime communication
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant Camera as Patient camera
+  participant Local as Local vision pipeline
+  participant API as Cloudflare Worker
+  participant Memory as D1 + R2
+  participant AI as Typed AI adapter
+  participant Patient as Patient UI
+  participant Caregiver as Caregiver UI
+
+  Camera->>Local: Continuous frames
+  Local->>Local: Motion gate, detect, track
+  alt No meaningful movement
+    Local-->>Local: Delete temporary frames
+  else Important object event
+    Local->>API: Five-second event + selected evidence
+    API->>AI: Describe and embed approved evidence
+    AI-->>API: Structured description + embedding
+    API->>Memory: Store facts, frame key, boxes, provenance
+  else Possible fall
+    Local->>API: Immediate possible-fall event
+    API->>Memory: Persist incident and evidence
+    API-->>Caregiver: Alert with review actions
+  end
+  Patient->>API: Voice or typed question
+  API->>Memory: Hybrid semantic search
+  Memory-->>API: Ranked memories + supporting frame
+  API->>AI: Grounded bilingual response
+  AI-->>API: Answer + speech
+  API-->>Patient: Text, voice, frame, and object box
+  Caregiver->>API: Approve, edit, reject, or resolve
+  API->>Memory: Update trusted state and audit trail
 ```
 
 ### Communication model
