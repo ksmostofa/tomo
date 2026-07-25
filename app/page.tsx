@@ -1,5 +1,5 @@
 import type { Metadata } from "next"
-import { TomoUiPrototype } from "@/components/tomo-ui-prototype"
+import { TomoExperienceApp } from "@/components/tomo-experience"
 
 export const metadata: Metadata = {
   title: "Tomo — A familiar voice. A trusted connection.",
@@ -8,5 +8,5 @@ export const metadata: Metadata = {
 }
 
 export default function Home() {
-  return <TomoUiPrototype />
+  return <TomoExperienceApp />
 }

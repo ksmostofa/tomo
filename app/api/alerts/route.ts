@@ -1,4 +1,4 @@
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { getDbOptional } from "@/db";
 import { alerts, households } from "@/db/schema";
 import { householdFrom, readJson, requireText, RouteError, routeError } from "@/lib/server/http";
@@ -24,6 +24,16 @@ export async function POST(request: Request) {
     if (!payload.type) throw new RouteError(400, "type is required");
     const title = requireText(payload.title, "title", 160);
     const message = requireText(payload.message, "message", 2_000);
+    if (payload.type === "possible_fall") {
+      const [recent] = await db.select().from(alerts).where(and(
+        eq(alerts.householdId, householdId),
+        eq(alerts.type, "possible_fall"),
+        eq(alerts.status, "open"),
+      )).orderBy(desc(alerts.createdAt)).limit(1);
+      if (recent && Date.now() - Date.parse(`${recent.createdAt.replace(" ", "T")}Z`) < 10 * 60_000) {
+        return Response.json({ alert: recent, notification: null, deduplicated: true });
+      }
+    }
     await db.insert(households).values({ id: householdId }).onConflictDoNothing();
     const [alert] = await db.insert(alerts).values({ id: crypto.randomUUID(), householdId, type: payload.type, severity: payload.severity ?? "important", title, message, evidenceKey: payload.evidenceKey?.trim() || null }).returning();
     const notification = await notifyCaregiver(`[TOMO] ${title}`, message).catch((error) => {

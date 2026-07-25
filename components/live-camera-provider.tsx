@@ -6,6 +6,7 @@ import { Camera, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import { detectPersonalObjects } from "@/lib/client/personal-object-detector"
 import { cn } from "@/lib/utils"
 
 export type ObjectDetection = {
@@ -13,26 +14,23 @@ export type ObjectDetection = {
   label: string
   score: number
   box: { x: number; y: number; width: number; height: number }
-  demo?: boolean
 }
 
 type CameraState = "starting" | "loading-model" | "live" | "blocked" | "unsupported" | "error"
 type Runtime = "WebGPU" | "WebAssembly" | null
+type PersonalDetectorState = "idle" | "loading" | "ready" | "error"
 type OrtModule = typeof import("onnxruntime-web")
 
 type LiveCameraContextValue = {
   detections: ObjectDetection[]
-  demoFallActive: boolean
   realFallActive: boolean
   fallConfidence: number
-  demoGlassesEnabled: boolean
+  personalDetectorState: PersonalDetectorState
   inferenceMs: number
   state: CameraState
   runtime: Runtime
   error: string | null
   stream: MediaStream | null
-  setDemoGlassesEnabled: (enabled: boolean) => void
-  simulateFall: () => void
   retry: () => Promise<void>
 }
 
@@ -45,6 +43,7 @@ const TARGET_INFERENCE_INTERVAL_MS = 220
 const MODEL_PATH = "/yolo26n.onnx"
 const FALL_MODEL_PATH = "/memoria-fall.onnx"
 const ORT_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/"
+const PERSONAL_INFERENCE_INTERVAL_MS = 2_500
 
 const COCO_LABELS = [
   "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck", "boat", "traffic light",
@@ -88,7 +87,7 @@ async function createYoloSession(): Promise<{ ort: OrtModule; session: Inference
   const ort = await import("onnxruntime-web/wasm")
   ort.env.wasm.wasmPaths = ORT_WASM_PATH
   ort.env.wasm.numThreads = 1
-  ort.env.wasm.proxy = true
+  ort.env.wasm.proxy = false
   const session = await ort.InferenceSession.create(MODEL_PATH, {
     executionProviders: ["wasm"],
     graphOptimizationLevel: "all",
@@ -168,7 +167,7 @@ function findMotionRegion(
   previousLuma: Uint8Array | null,
 ) {
   const context = canvas.getContext("2d", { willReadFrequently: true })
-  if (!context) return { currentLuma: previousLuma, box: null }
+  if (!context) return { currentLuma: previousLuma, box: null, meaningfulMotion: false }
 
   context.drawImage(video, 0, 0, MOTION_WIDTH, MOTION_HEIGHT)
   const pixels = context.getImageData(0, 0, MOTION_WIDTH, MOTION_HEIGHT).data
@@ -199,7 +198,8 @@ function findMotionRegion(
   const regionRatio = width > 0 && height > 0 ? (width * height) / currentLuma.length : 0
   const isHeldObjectMotion = previousLuma && changed >= 12 && changedRatio < 0.22 && regionRatio < 0.42 && width >= 3 && height >= 3
 
-  if (!isHeldObjectMotion) return { currentLuma, box: null }
+  const meaningfulMotion = Boolean(previousLuma && changedRatio >= 0.025)
+  if (!isHeldObjectMotion) return { currentLuma, box: null, meaningfulMotion }
 
   const paddingX = Math.max(2, Math.round(width * 0.18))
   const paddingY = Math.max(2, Math.round(height * 0.18))
@@ -210,6 +210,7 @@ function findMotionRegion(
 
   return {
     currentLuma,
+    meaningfulMotion,
     box: {
       x: (left / MOTION_WIDTH) * video.videoWidth,
       y: (top / MOTION_HEIGHT) * video.videoHeight,
@@ -222,10 +223,9 @@ function findMotionRegion(
 export function LiveCameraProvider({ children }: { children: React.ReactNode }) {
   const [stream, setStream] = React.useState<MediaStream | null>(null)
   const [detections, setDetections] = React.useState<ObjectDetection[]>([])
-  const [demoFallActive, setDemoFallActive] = React.useState(false)
   const [realFallActive, setRealFallActive] = React.useState(false)
   const [fallConfidence, setFallConfidence] = React.useState(0)
-  const [demoGlassesEnabled, setDemoGlassesEnabled] = React.useState(true)
+  const [personalDetectorState, setPersonalDetectorState] = React.useState<PersonalDetectorState>("idle")
   const [state, setState] = React.useState<CameraState>("starting")
   const [runtime, setRuntime] = React.useState<Runtime>(null)
   const [error, setError] = React.useState<string | null>(null)
@@ -237,44 +237,19 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
   const sourceVideoRef = React.useRef<HTMLVideoElement | null>(null)
   const canvasRef = React.useRef<HTMLCanvasElement | null>(null)
   const loopTimerRef = React.useRef<number | null>(null)
+  const fallLoadTimerRef = React.useRef<number | null>(null)
+  const fallSessionPromiseRef = React.useRef<Promise<InferenceSession> | null>(null)
   const runningRef = React.useRef(false)
   const streamRef = React.useRef<MediaStream | null>(null)
-  const demoFallTimerRef = React.useRef<number | null>(null)
-  const demoGlassesRef = React.useRef(true)
-
-  React.useEffect(() => {
-    demoGlassesRef.current = demoGlassesEnabled
-  }, [demoGlassesEnabled])
-
-  const simulateFall = React.useCallback(() => {
-    if (demoFallTimerRef.current !== null) window.clearTimeout(demoFallTimerRef.current)
-    setDemoFallActive(true)
-    demoFallTimerRef.current = window.setTimeout(() => {
-      setDemoFallActive(false)
-      demoFallTimerRef.current = null
-    }, 12_000)
-    const householdId = window.localStorage.getItem("tomo-household-id")
-    if (householdId) {
-      void fetch("/api/alerts", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
-        body: JSON.stringify({
-          type: "possible_fall",
-          severity: "urgent",
-          title: "Possible fall — demo",
-          message: "A synthetic possible-fall event was created from the camera demo control.",
-        }),
-      }).catch(() => undefined)
-    }
-  }, [])
-
   const stopLoop = React.useCallback(() => {
     runningRef.current = false
     if (loopTimerRef.current !== null) window.clearTimeout(loopTimerRef.current)
+    if (fallLoadTimerRef.current !== null) window.clearTimeout(fallLoadTimerRef.current)
     loopTimerRef.current = null
+    fallLoadTimerRef.current = null
   }, [])
 
-  const startInference = React.useCallback((video: HTMLVideoElement, session: InferenceSession, fallSession: InferenceSession | null, ort: OrtModule) => {
+  const startInference = React.useCallback((video: HTMLVideoElement, session: InferenceSession, ort: OrtModule) => {
     stopLoop()
     runningRef.current = true
     const canvas = document.createElement("canvas")
@@ -285,11 +260,18 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     motionCanvas.width = MOTION_WIDTH
     motionCanvas.height = MOTION_HEIGHT
     let previousLuma: Uint8Array | null = null
-    let heldObjectBox: ObjectDetection["box"] | null = null
-    let heldObjectExpiresAt = 0
     let lastFallInferenceAt = 0
+    let lastMeaningfulMotionAt = 0
+    let lastAlertAt = 0
     let fallVotes: Array<{ fallen: boolean; confidence: number }> = []
     let alertSent = false
+    let personalInferenceRunning = false
+    let lastPersonalInferenceAt = 0
+    let personalBurstRemaining = 0
+    let personalDetections: ObjectDetection[] = []
+    let personalDetectionsExpireAt = 0
+    let personalHistory: Array<Set<string>> = []
+    const lastStored = new Map<string, { x: number; y: number; at: number }>()
 
     const detect = async () => {
       if (!runningRef.current) return
@@ -301,35 +283,100 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
           const results = await session.run({ images: frame.tensor })
           const output = results[session.outputNames[0]]
           const liveDetections = parseYoloOutput(output.data as Float32Array, frame)
-          if (demoGlassesRef.current) {
-            const candidate = liveDetections
-              .filter((detection) => detection.label !== "person")
-              .sort((left, right) => right.score - left.score)[0]
-            const motion = findMotionRegion(video, motionCanvas, previousLuma)
-            previousLuma = motion.currentLuma
-            if (motion.box) {
-              heldObjectBox = motion.box
-              heldObjectExpiresAt = performance.now() + 4_000
-            }
+          const motion = findMotionRegion(video, motionCanvas, previousLuma)
+          previousLuma = motion.currentLuma
+          const now = performance.now()
+          if (motion.meaningfulMotion) lastMeaningfulMotionAt = now
 
-            if (candidate) {
-              setDetections(liveDetections.map((detection) => detection.id === candidate.id
-                ? { ...detection, id: "demo-glasses", label: "Glasses", score: Math.max(0.91, detection.score), demo: true }
-                : detection))
-            } else if (heldObjectBox && performance.now() < heldObjectExpiresAt) {
-              setDetections([
-                ...liveDetections,
-                { id: "demo-glasses-motion", label: "Glasses", score: 0.91, box: heldObjectBox, demo: true },
-              ])
-            } else {
-              setDetections(liveDetections)
-            }
-          } else {
-            previousLuma = null
-            heldObjectBox = null
-            setDetections(liveDetections)
+          if (motion.box) personalBurstRemaining = Math.max(personalBurstRemaining, 2)
+          if ((motion.box || personalBurstRemaining > 0) && !personalInferenceRunning && now - lastPersonalInferenceAt >= PERSONAL_INFERENCE_INTERVAL_MS) {
+            personalInferenceRunning = true
+            if (!motion.box) personalBurstRemaining -= 1
+            lastPersonalInferenceAt = now
+            setPersonalDetectorState((current) => current === "ready" ? current : "loading")
+            const snapshot = document.createElement("canvas")
+            const snapshotWidth = Math.min(480, video.videoWidth)
+            const snapshotHeight = Math.round(snapshotWidth * (video.videoHeight / video.videoWidth))
+            snapshot.width = snapshotWidth
+            snapshot.height = snapshotHeight
+            snapshot.getContext("2d")?.drawImage(video, 0, 0, snapshotWidth, snapshotHeight)
+            const evidenceDataUrl = snapshot.toDataURL("image/jpeg", 0.55)
+            const sceneDetections = [...liveDetections]
+
+            void detectPersonalObjects(evidenceDataUrl).then((results) => {
+              setPersonalDetectorState("ready")
+              personalHistory = [...personalHistory, new Set(results.map((result) => result.label))].slice(-3)
+              const confirmedLabels = new Set(results
+                .map((result) => result.label)
+                .filter((label) => personalHistory.filter((sample) => sample.has(label)).length >= 2))
+              personalDetections = results
+                .filter((result) => confirmedLabels.has(result.label))
+                .map((result, index) => ({
+                  id: `personal-${result.label}-${index}`,
+                  label: result.label === "keys" ? "Keys" : "Glasses",
+                  score: result.score,
+                  box: {
+                    x: (result.box.xmin / snapshotWidth) * video.videoWidth,
+                    y: (result.box.ymin / snapshotHeight) * video.videoHeight,
+                    width: ((result.box.xmax - result.box.xmin) / snapshotWidth) * video.videoWidth,
+                    height: ((result.box.ymax - result.box.ymin) / snapshotHeight) * video.videoHeight,
+                  },
+                }))
+              personalDetectionsExpireAt = performance.now() + 4_000
+              setDetections([...sceneDetections, ...personalDetections])
+
+              for (const detection of personalDetections) {
+                const normalizedX = (detection.box.x + detection.box.width / 2) / video.videoWidth
+                const normalizedY = (detection.box.y + detection.box.height / 2) / video.videoHeight
+                const previous = lastStored.get(detection.label)
+                const moved = !previous || Math.hypot(normalizedX - previous.x, normalizedY - previous.y) >= 0.12
+                const expired = !previous || Date.now() - previous.at >= 5 * 60_000
+                if (!moved && !expired) continue
+                lastStored.set(detection.label, { x: normalizedX, y: normalizedY, at: Date.now() })
+                const nearby = sceneDetections
+                  .filter((scene) => ["dining table", "chair", "couch", "bed", "bench"].includes(scene.label))
+                  .sort((left, right) => {
+                    const leftDistance = Math.hypot(left.box.x + left.box.width / 2 - detection.box.x, left.box.y + left.box.height / 2 - detection.box.y)
+                    const rightDistance = Math.hypot(right.box.x + right.box.width / 2 - detection.box.x, right.box.y + right.box.height / 2 - detection.box.y)
+                    return leftDistance - rightDistance
+                  })[0]
+                const horizontal = normalizedX < 0.34 ? "left" : normalizedX > 0.66 ? "right" : "center"
+                const location = nearby ? `near the ${nearby.label}` : `in the ${horizontal} of the camera view`
+                const householdId = window.localStorage.getItem("tomo-household-id")
+                if (!householdId) continue
+                void fetch("/api/memories", {
+                  method: "POST",
+                  headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
+                  body: JSON.stringify({
+                    description: `${detection.label} were last seen ${location}.`,
+                    objectLabels: [detection.label.toLowerCase(), nearby?.label].filter(Boolean),
+                    occurredAt: new Date().toISOString(),
+                    evidenceDataUrl: evidenceDataUrl.length <= 120_000 ? evidenceDataUrl : undefined,
+                    boxes: [{
+                      label: detection.label,
+                      confidence: detection.score,
+                      x: detection.box.x / video.videoWidth,
+                      y: detection.box.y / video.videoHeight,
+                      width: detection.box.width / video.videoWidth,
+                      height: detection.box.height / video.videoHeight,
+                    }],
+                    importance: "important",
+                    provenance: "camera",
+                  }),
+                }).catch(() => undefined)
+              }
+            }).catch((personalError) => {
+              console.warn("Personal-object detector unavailable", personalError)
+              setPersonalDetectorState("error")
+            }).finally(() => {
+              personalInferenceRunning = false
+            })
           }
 
+          if (performance.now() >= personalDetectionsExpireAt) personalDetections = []
+          setDetections([...liveDetections, ...personalDetections])
+
+          const fallSession = fallSessionRef.current
           if (fallSession && performance.now() - lastFallInferenceAt >= 700) {
             lastFallInferenceAt = performance.now()
             const fallResults = await fallSession.run({ images: frame.tensor })
@@ -338,15 +385,19 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
             const fallen = postureDetections.filter((detection) => detection.label === "fallen").sort((left, right) => right.score - left.score)[0]
             fallVotes = [...fallVotes, { fallen: Boolean(fallen), confidence: fallen?.score ?? 0 }].slice(-5)
             const positiveVotes = fallVotes.filter((vote) => vote.fallen)
-            const confirmed = fallVotes.length >= 4 && positiveVotes.length >= 3
+            const confirmed = fallVotes.length >= 5
+              && positiveVotes.length >= 4
+              && positiveVotes.every((vote) => vote.confidence >= 0.7)
+              && performance.now() - lastMeaningfulMotionAt <= 8_000
             const confidence = positiveVotes.length
               ? positiveVotes.reduce((total, vote) => total + vote.confidence, 0) / positiveVotes.length
               : 0
             setFallConfidence(confidence)
             setRealFallActive(confirmed)
 
-            if (confirmed && !alertSent) {
+            if (confirmed && !alertSent && Date.now() - lastAlertAt >= 10 * 60_000) {
               alertSent = true
+              lastAlertAt = Date.now()
               const householdId = window.localStorage.getItem("tomo-household-id")
               if (householdId) {
                 void fetch("/api/alerts", {
@@ -438,21 +489,27 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       runtimeRef.current = detector.runtime
       setRuntime(detector.runtime)
 
-      let fallSession = fallSessionRef.current
-      if (!fallSession) {
-        try {
-          fallSession = await detector.ort.InferenceSession.create(FALL_MODEL_PATH, {
+      if (!sourceVideoRef.current) throw new Error("Camera video was interrupted before analysis could start.")
+      startInference(sourceVideoRef.current, detector.session, detector.ort)
+
+      if (!fallSessionRef.current && !fallSessionPromiseRef.current) {
+        fallLoadTimerRef.current = window.setTimeout(() => {
+          fallLoadTimerRef.current = null
+          const fallSessionPromise = detector.ort.InferenceSession.create(FALL_MODEL_PATH, {
             executionProviders: [detector.runtime === "WebGPU" ? "webgpu" : "wasm"],
             graphOptimizationLevel: "all",
           })
-          fallSessionRef.current = fallSession
-        } catch (fallModelError) {
-          console.error("Fall model startup failed; continuing with object detection", fallModelError)
-        }
+          fallSessionPromiseRef.current = fallSessionPromise
+          void fallSessionPromise.then((fallSession) => {
+            if (runningRef.current) fallSessionRef.current = fallSession
+            else void fallSession.release()
+          }).catch((fallModelError) => {
+            console.error("Fall model startup failed; continuing with object detection", fallModelError)
+          }).finally(() => {
+            if (fallSessionPromiseRef.current === fallSessionPromise) fallSessionPromiseRef.current = null
+          })
+        }, 1_000)
       }
-
-      if (!sourceVideoRef.current) throw new Error("Camera video was interrupted before analysis could start.")
-      startInference(sourceVideoRef.current, detector.session, fallSession, detector.ort)
     } catch (detectorError) {
       console.error("YOLO startup failed", detectorError)
       setState("error")
@@ -464,7 +521,6 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     const startupTimer = window.setTimeout(() => void start(), 0)
     return () => {
       window.clearTimeout(startupTimer)
-      if (demoFallTimerRef.current !== null) window.clearTimeout(demoFallTimerRef.current)
       stopLoop()
       streamRef.current?.getTracks().forEach((track) => track.stop())
       streamRef.current = null
@@ -479,7 +535,7 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     }
   }, [start, stopLoop])
 
-  const value = React.useMemo<LiveCameraContextValue>(() => ({ detections, demoFallActive, realFallActive, fallConfidence, demoGlassesEnabled, inferenceMs, state, runtime, error, stream, setDemoGlassesEnabled, simulateFall, retry: start }), [demoFallActive, demoGlassesEnabled, detections, error, fallConfidence, inferenceMs, realFallActive, runtime, simulateFall, start, state, stream])
+  const value = React.useMemo<LiveCameraContextValue>(() => ({ detections, realFallActive, fallConfidence, personalDetectorState, inferenceMs, state, runtime, error, stream, retry: start }), [detections, error, fallConfidence, inferenceMs, personalDetectorState, realFallActive, runtime, start, state, stream])
   return <LiveCameraContext.Provider value={value}>{children}</LiveCameraContext.Provider>
 }
 
@@ -490,7 +546,7 @@ export function useLiveCamera() {
 }
 
 export function LiveCameraView({ className, compact = false }: { className?: string; compact?: boolean }) {
-  const { demoFallActive, realFallActive, fallConfidence, demoGlassesEnabled, detections, error, inferenceMs, retry, runtime, state, stream } = useLiveCamera()
+  const { realFallActive, fallConfidence, detections, error, inferenceMs, retry, runtime, state, stream } = useLiveCamera()
   const videoRef = React.useRef<HTMLVideoElement | null>(null)
   const [videoSize, setVideoSize] = React.useState({ width: 1280, height: 720 })
 
@@ -523,7 +579,7 @@ export function LiveCameraView({ className, compact = false }: { className?: str
           }}
         >
           <span className="absolute left-0 top-0 max-w-40 -translate-y-full truncate rounded-t-md bg-primary px-2 py-1 text-[11px] font-medium leading-none text-primary-foreground">
-            {detection.label} · {Math.round(detection.score * 100)}%{detection.demo ? " · Demo" : ""}
+            {detection.label} · {Math.round(detection.score * 100)}%
           </span>
         </div>
       ))}
@@ -559,15 +615,9 @@ export function LiveCameraView({ className, compact = false }: { className?: str
         </div>
       )}
 
-      {hasVideo && demoGlassesEnabled && (
-        <div className="absolute bottom-3 left-3">
-          <Badge variant="secondary" className="bg-background/90 backdrop-blur">Demo glasses mapping on</Badge>
-        </div>
-      )}
-
-      {hasVideo && (realFallActive || demoFallActive) && (
+      {hasVideo && realFallActive && (
         <div className="absolute inset-x-3 bottom-3 flex justify-center" role="alert">
-          <Badge variant="destructive" className="px-3 py-1.5">{realFallActive ? `Possible fall · ${Math.round(fallConfidence * 100)}% · Local model` : "Possible fall · Demo"}</Badge>
+          <Badge variant="destructive" className="px-3 py-1.5">Possible fall · {Math.round(fallConfidence * 100)}% · Local model</Badge>
         </div>
       )}
     </div>

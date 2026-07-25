@@ -10,6 +10,7 @@ type NewMemory = {
   objectLabels?: string[];
   occurredAt?: string;
   bestFrameKey?: string;
+  evidenceDataUrl?: string;
   videoKey?: string;
   boxes?: Array<{ label: string; confidence: number; x: number; y: number; width: number; height: number }>;
   importance?: "routine" | "important" | "safety";
@@ -50,6 +51,10 @@ export async function POST(request: Request) {
     const occurredAt = payload.occurredAt ? new Date(payload.occurredAt) : new Date();
     if (Number.isNaN(occurredAt.getTime())) throw new RouteError(400, "occurredAt is invalid");
     const id = crypto.randomUUID();
+    const evidenceDataUrl = payload.evidenceDataUrl?.trim() || null;
+    if (evidenceDataUrl && (!/^data:image\/(jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(evidenceDataUrl) || evidenceDataUrl.length > 120_000)) {
+      throw new RouteError(413, "Inline evidence must be a JPEG or WebP data URL smaller than 120 KB");
+    }
     const embedded = await createEmbedding(description).catch((error) => {
       console.warn("Embedding unavailable; storing lexical memory", error);
       return null;
@@ -63,6 +68,7 @@ export async function POST(request: Request) {
       objectLabels: Array.isArray(payload.objectLabels) ? payload.objectLabels.slice(0, 30) : [],
       occurredAt: occurredAt.toISOString(),
       bestFrameKey: payload.bestFrameKey?.trim() || null,
+      evidenceDataUrl,
       videoKey: payload.videoKey?.trim() || null,
       boxes: Array.isArray(payload.boxes) ? payload.boxes.slice(0, 50) : [],
       importance: payload.importance ?? "routine",
@@ -72,7 +78,7 @@ export async function POST(request: Request) {
       embeddingModel: embedded?.model ?? null,
     }).returning();
 
-    let notification: Awaited<ReturnType<typeof notifyCaregiver>> | null = null;
+    let notification: { delivered: boolean; provider: "disabled" | "resend" | "failed"; id: string | null } | null = null;
     if (approvalState === "pending") {
       await db.batch([
         db.insert(approvals).values({ id: crypto.randomUUID(), householdId, memoryId: id, statement: description }),

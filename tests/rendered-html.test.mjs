@@ -11,7 +11,7 @@ async function source(path) {
 test("ships the patient and caregiver experience with the approved language", async () => {
   const [layout, ui] = await Promise.all([
     source("app/layout.tsx"),
-    source("components/tomo-ui-prototype.tsx"),
+    source("components/tomo-experience.tsx"),
   ])
 
   assert.match(layout, /Tomo — A familiar voice\. A trusted connection\./)
@@ -19,7 +19,8 @@ test("ships the patient and caregiver experience with the approved language", as
   assert.match(ui, /English or Japanese is okay/)
   assert.match(ui, /Call Yuki/)
   assert.match(ui, /Care inbox/)
-  assert.match(ui, /Possible fall — please check/)
+  assert.match(ui, /No possible-fall alerts/)
+  assert.doesNotMatch(ui, /tomo-demo-seeded|Example incident|Simulate possible fall|Demo glasses mapping/)
 })
 
 test("keeps perception local and includes both detector artifacts", async () => {
@@ -32,9 +33,21 @@ test("keeps perception local and includes both detector artifacts", async () => 
   assert.match(camera, /onnxruntime-web/)
   assert.match(camera, /yolo26n\.onnx/)
   assert.match(camera, /memoria-fall\.onnx/)
-  assert.match(camera, /3-of-5|positiveVotes\.length >= 3/)
+  assert.match(camera, /detectPersonalObjects/)
+  assert.match(camera, /positiveVotes\.length >= 4/)
+  assert.match(camera, /lastMeaningfulMotionAt/)
+  assert.match(camera, /10 \* 60_000/)
   assert.ok(objectModel.size > 1_000_000)
   assert.ok(fallModel.size > 1_000_000)
+})
+
+test("uses the newest object observation and records repeat-aware retrieval receipts", async () => {
+  const chat = await source("app/api/chat/route.ts")
+  assert.match(chat, /Date\.parse\(right\.memory\.occurredAt\)/)
+  assert.match(chat, /retrieval_answered/)
+  assert.match(chat, /previousReceipt\?\.resourceId === primary\.id/)
+  assert.match(chat, /Have you still not found it\?/)
+  assert.match(chat, /candidates\.length === 0/)
 })
 
 test("includes D1-backed API routes and a reproducible Pages build", async () => {
@@ -61,4 +74,6 @@ test("includes D1-backed API routes and a reproducible Pages build", async () =>
 test("does not publish private execution plans", async () => {
   await assert.rejects(access(new URL("outputs/tomo-execution-plan.md", root)))
   await assert.rejects(access(new URL("tomo-final-project-plan.md", root)))
+  await assert.rejects(access(new URL("public/fall-memory.jpg", root)))
+  await assert.rejects(access(new URL("public/glasses-memory.jpg", root)))
 })

@@ -14,6 +14,7 @@ export const memories = sqliteTable("memories", {
   objectLabels: text("object_labels", { mode: "json" }).$type<string[]>().notNull().default([]),
   occurredAt: text("occurred_at").notNull(),
   bestFrameKey: text("best_frame_key"),
+  evidenceDataUrl: text("evidence_data_url"),
   videoKey: text("video_key"),
   boxes: text("boxes", { mode: "json" }).$type<Array<{
     label: string;

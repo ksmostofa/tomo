@@ -7,6 +7,11 @@ export async function GET() {
     service: "tomo",
     time: new Date().toISOString(),
     providers,
-    ready: providers.database && providers.evidenceStorage,
+    ready: providers.database && (providers.qwen || providers.cloudflareQwen),
+    optional: {
+      privateClipStorage: providers.evidenceStorage,
+      directQwenCloud: providers.qwen,
+      caregiverEmail: providers.email,
+    },
   }, { headers: { "Cache-Control": "no-store" } });
 }

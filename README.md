@@ -36,17 +36,19 @@ TOMO is assistive software, not a medical device. It reports a **possible fall**
 - Opens directly into a calm, centered voice experience.
 - Starts the local camera after browser consent and keeps monitoring while minimized.
 - Shows real YOLO labels and bounding boxes only for current detections.
-- Answers questions such as “Where are my glasses?” with a grounded frame, label, time, and spoken response.
+- Answers questions such as “Where are my glasses?” from the newest trusted observation, with a retained frame, label, time, and spoken response when available.
+- Recognizes glasses and keys with a motion-gated open-vocabulary detector in addition to YOLO’s COCO classes.
+- If the same observation is requested again, acknowledges the earlier answer and asks whether the object is still missing; a newer observation always replaces the old answer.
 - Keeps `Call Yuki` prominent as a familiar human fallback.
 - Sends medicine, schedule, and other sensitive memories to caregiver approval before trusting them.
 
 ### Caregiver
 
-- Opens into a care inbox with possible-fall evidence, confidence, timeline, and actions.
-- Can acknowledge, call, resolve, or review an incident.
+- Opens into a care inbox containing only real stored alerts and approval requests—no seeded incident.
+- Can acknowledge or resolve a real incident.
 - Approves, edits, or rejects patient-submitted sensitive memories.
 - Uses the same chat interface to retrieve evidence or add trusted semantic memory.
-- Manages schedules, contacts, privacy settings, and camera health.
+- Can configure the caregiver phone number locally from the patient’s `Call Yuki` dialog.
 
 ## System design
 
@@ -56,7 +58,7 @@ flowchart LR
     INPUT["Camera + microphone"]
     BUFFER["Short in-memory ring buffer"]
     GATE["Motion gate"]
-    VISION["YOLO26n + fall analysis"]
+    VISION["YOLO26n + OWL-ViT + fall analysis"]
     TRACK["Object and person tracking"]
     SELECT["Important-event selector"]
     OVERLAY["Live labels + voice UI"]
@@ -77,15 +79,18 @@ flowchart LR
   subgraph EDGE["Cloudflare application"]
     API["Next.js / vinext Worker API"]
     D1[("D1 structured memory")]
-    R2[("R2 private evidence")]
+    INLINE[("D1 bounded inline frames")]
+    R2[("R2 private evidence - optional")]
     SEARCH["Hybrid semantic retrieval"]
     OUTBOX["Alerts + approval outbox"]
     CONTEXT["Validated live context cache"]
 
     API --> D1
-    API --> R2
+    API --> INLINE
+    API -.-> R2
     D1 --> SEARCH
-    R2 --> SEARCH
+    INLINE --> SEARCH
+    R2 -.-> SEARCH
     API --> OUTBOX
     API --> CONTEXT
     SEARCH --> API
@@ -155,21 +160,22 @@ sequenceDiagram
 
 1. **Fast local lane:** the camera, motion gate, YOLO, tracker, rolling buffer, and bounding-box rendering run in the browser. This path never waits for cloud AI.
 2. **Safety lane:** a fall-like posture must persist across time before TOMO creates a possible-fall event. The immediate caregiver alert is separate from slower video enrichment.
-3. **Memory lane:** only important motion windows are summarized. The selected frame and coordinates are stored in R2; structured facts and provenance are stored in D1.
-4. **Retrieval lane:** chat creates an intent, searches filtered lexical and vector candidates, retrieves evidence, and returns a concise answer with confidence and proof.
+3. **Memory lane:** only confirmed glasses/keys observations and safety events leave the transient browser buffer. A bounded JPEG, coordinates, structured facts, and provenance are stored in D1. R2 is an optional production upgrade.
+4. **Retrieval lane:** explicit glasses/keys questions select the newest trusted observation first. TOMO records a retrieval receipt; asking again against the same observation produces a gentle follow-up, while a newer observation replaces it. Other questions use hybrid lexical/vector retrieval and Qwen grounding.
 5. **Approval lane:** caregiver memories are trusted immediately. Sensitive patient statements remain pending until a caregiver approves or edits them.
 6. **Voice lane:** an English/Japanese `VoiceRealtime` adapter streams ASR and TTS. Typed chat remains the fallback when realtime voice is unavailable.
 
-## Five-second memory capture
+## Memory capture contract
 
-When motion becomes meaningful, TOMO keeps the relevant part of its local rolling buffer and produces this contract:
+When movement triggers a confirmed glasses/keys observation, TOMO selects a bounded supporting frame and produces this contract. Full five-second clip retention is the next R2-backed step and is not claimed as active today.
 
 ```ts
 type MemoryEvent = {
   description: string
   objectLabels: string[]
   occurredAt: string
-  bestFrameKey: string
+  bestFrameKey?: string
+  evidenceDataUrl?: string
   boxes: Array<{
     label: string
     confidence: number
@@ -179,15 +185,15 @@ type MemoryEvent = {
     height: number
   }>
   videoKey?: string
-  embeddingModel: string
-  embedding: number[]
+  embeddingModel?: string
+  embedding?: number[]
   importance: "routine" | "important" | "safety"
   approvalState: "trusted" | "pending" | "rejected"
   provenance: "camera" | "patient" | "caregiver"
 }
 ```
 
-Routine, no-motion footage expires locally. Evidence uploads use short retention, private object keys, household isolation, and an audit trail.
+Routine, no-motion footage expires locally. Current retained JPEGs are capped before entering D1. When R2 is enabled, clips must use short retention, private object keys, household isolation, and an audit trail.
 
 ## Technology stack
 
@@ -196,10 +202,10 @@ Routine, no-motion footage expires locally. Evidence uploads use short retention
 | Web application | Next.js 16, React 19, TypeScript | One responsive patient/caregiver application |
 | Cloudflare runtime | vinext, Cloudflare Workers | Low-cost edge rendering and API execution |
 | UI | shadcn/ui preset `b1VlIugq`, Base UI, Lucide | Strict, accessible component vocabulary |
-| Local vision | YOLO26n ONNX, ONNX Runtime Web | Live object boxes with WebGPU/WASM fallback |
+| Local vision | YOLO26n ONNX, OWL-ViT via Transformers.js, ONNX Runtime Web | Fast COCO boxes plus motion-gated glasses/keys recognition with WebGPU/WASM fallback |
 | Fall analysis | Specialized fall model + temporal tracker | Conservative possible-fall events |
 | Structured storage | Cloudflare D1, Drizzle ORM | Memories, alerts, approvals, schedule, audit |
-| Evidence storage | Cloudflare R2 adapter | Private best frames and short event clips when the binding is enabled |
+| Evidence storage | Bounded D1 data URLs; Cloudflare R2 adapter | Current selected frames; private clips when the optional R2 binding is enabled |
 | Semantic memory | Qwen embeddings + D1 hybrid ranking | English/Japanese evidence retrieval |
 | Voice | Browser Web Speech + typed provider boundary | Bilingual ASR/TTS with typed-chat fallback |
 | Deployment | Cloudflare Pages advanced mode + GitHub | Public HTTPS UI and edge API |
@@ -224,8 +230,8 @@ Provider failures are explicit and recoverable. TOMO must retain typed-chat fall
 ```text
 app/                         Next.js application shell
 components/
-  tomo-ui-prototype.tsx      Patient and caregiver experiences
-  live-camera-provider.tsx   Persistent camera + local YOLO runtime
+  tomo-experience.tsx        Patient and caregiver experiences
+  live-camera-provider.tsx   Persistent camera + YOLO, OWL-ViT and fall runtime
   ui/                        shadcn/ui components only
 db/                          Drizzle schema and D1 access
 drizzle/                     Generated database migrations
@@ -245,13 +251,15 @@ This repository is under active construction. The README describes the approved 
 | Capability | Status |
 |---|---|
 | Native Cloudflare Pages deployment | **Live** |
-| Patient and caregiver responsive UI | Working prototype |
+| Patient and caregiver responsive UI | **Live** |
 | Strict shadcn `b1VlIugq` design system | Working |
 | Persistent camera while minimized | Working |
 | Live YOLO26n labels and bounding boxes | Working locally |
+| Motion-gated glasses/keys recognition | Working locally with OWL-ViT and 2-of-3 confirmation |
 | English/Japanese browser speech input/output | Working on compatible browsers |
-| Temporal Project Memoria fall model and D1 alert trigger | Working locally; conservative 3-of-5 vote |
-| Motion-gated five-second event capture | Not complete |
+| Temporal Project Memoria fall model and D1 alert trigger | Working locally; recent movement + 4-of-5 high-confidence votes + 10-minute deduplication |
+| Motion-gated selected-frame capture | **Live** for confirmed glasses/keys observations |
+| Full five-second event clip retention | Not enabled; requires R2 |
 | D1 structured + hybrid semantic memory | **Live** |
 | D1 fall-alert status and caregiver approval workflow | **Live** |
 | Cloudflare-hosted Qwen chat and embeddings | **Live** |
@@ -260,7 +268,7 @@ This repository is under active construction. The README describes the approved 
 | Email delivery | Adapter ready; sender credentials unavailable |
 | Authentication and household grants | Future production gate |
 
-Until authentication is added, public testing must use synthetic/demo information only. Browser-generated guest household IDs will isolate test sessions; they are not a substitute for identity or authorization.
+Until authentication is added, public testing must use fictional, non-sensitive information only. Browser-generated guest household IDs isolate browser sessions; they are not identity or authorization.
 
 ## Run locally
 

@@ -27,7 +27,10 @@ export function requireText(value: unknown, field: string, maxLength = 4_000) {
   return result;
 }
 
-export function householdFrom(request: Request, required = true) {
+export function householdFrom(request: Request): string;
+export function householdFrom(request: Request, required: true): string;
+export function householdFrom(request: Request, required: false): string | null;
+export function householdFrom(request: Request, required = true): string | null {
   const value = request.headers.get("x-tomo-household")?.trim();
   if (value && /^[a-zA-Z0-9_-]{8,80}$/.test(value)) return value;
   if (required) throw new RouteError(400, "x-tomo-household is required");
