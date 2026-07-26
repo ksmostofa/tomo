@@ -1,6 +1,7 @@
 "use client"
 
 import * as React from "react"
+import { useMutation } from "convex/react"
 import type { InferenceSession } from "onnxruntime-web"
 import { Camera, LoaderCircle, RefreshCw, ShieldCheck } from "lucide-react"
 
@@ -8,6 +9,8 @@ import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
 import { detectPersonalObjects } from "@/lib/client/personal-object-detector"
 import { cn } from "@/lib/utils"
+import { api } from "@/convex/_generated/api"
+import { useTomoHousehold } from "./tomo-household-context"
 
 export type ObjectDetection = {
   id: string
@@ -32,6 +35,8 @@ type LiveCameraContextValue = {
   error: string | null
   stream: MediaStream | null
   retry: () => Promise<void>
+  captureFiveSecondMemory: () => Promise<void>
+  captureState: "idle" | "capturing" | "saved" | "error"
 }
 
 const LiveCameraContext = React.createContext<LiveCameraContextValue | null>(null)
@@ -221,6 +226,11 @@ function findMotionRegion(
 }
 
 export function LiveCameraProvider({ children }: { children: React.ReactNode }) {
+  const { householdId: activeHouseholdId, userId, roles } = useTomoHousehold()
+  const cameraEnabled = roles.includes("patient")
+  const issueEvidenceWrite = useMutation(api.evidence.issueWrite)
+  const openPossibleFall = useMutation(api.alerts.openPossibleFall)
+  const rememberObservation = useMutation(api.memories.remember)
   const [stream, setStream] = React.useState<MediaStream | null>(null)
   const [detections, setDetections] = React.useState<ObjectDetection[]>([])
   const [realFallActive, setRealFallActive] = React.useState(false)
@@ -230,6 +240,9 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
   const [runtime, setRuntime] = React.useState<Runtime>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [inferenceMs, setInferenceMs] = React.useState(0)
+  const [captureState, setCaptureState] = React.useState<"idle" | "capturing" | "saved" | "error">("idle")
+  const captureRef = React.useRef<() => Promise<void>>(async () => undefined)
+  const liveDetectionsRef = React.useRef<ObjectDetection[]>([])
   const sessionRef = React.useRef<InferenceSession | null>(null)
   const fallSessionRef = React.useRef<InferenceSession | null>(null)
   const ortRef = React.useRef<OrtModule | null>(null)
@@ -263,11 +276,11 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     let previousLuma: Uint8Array | null = null
     let lastFallInferenceAt = 0
     let lastMeaningfulMotionAt = 0
-    let lastAlertAt = 0
     let fallVotes: Array<{ fallen: boolean; confidence: number }> = []
     let geometryFallVotes: boolean[] = []
     let previousPerson: { aspect: number; centerY: number; at: number } | null = null
     let rapidPostureChangeUntil = 0
+    let lowPostureStartedAt = 0
     let alertSent = false
     let personalInferenceRunning = false
     let lastPersonalInferenceAt = 0
@@ -277,7 +290,8 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     let personalHistory: Array<Set<string>> = []
     const lastStored = new Map<string, { x: number; y: number; at: number }>()
     let clipChunks: Blob[] = []
-    let previousClip: Blob | null = null
+    let completedClip: { blob: Blob; completedAt: number } | null = null
+    const clipWaiters = new Set<(clip: Blob | null) => void>()
     let clipRecorder: MediaRecorder | null = null
     let clipMimeType = "video/webm"
     if (typeof MediaRecorder !== "undefined" && video.srcObject instanceof MediaStream) {
@@ -293,7 +307,11 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
             if (event.data.size) clipChunks.push(event.data)
           })
           recorder.addEventListener("stop", () => {
-            if (clipChunks.length) previousClip = new Blob([...clipChunks], { type: clipMimeType || "video/webm" })
+            if (clipChunks.length) {
+              completedClip = { blob: new Blob([...clipChunks], { type: clipMimeType || "video/webm" }), completedAt: Date.now() }
+              for (const resolve of clipWaiters) resolve(completedClip.blob)
+              clipWaiters.clear()
+            }
             if (runningRef.current && video.srcObject instanceof MediaStream && video.srcObject.active) startClipSegment()
           }, { once: true })
           recorder.start(1_000)
@@ -305,11 +323,61 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
         video.srcObject.getVideoTracks()[0]?.addEventListener("ended", () => {
           if (clipRecorder?.state !== "inactive") clipRecorder?.stop()
           clipChunks = []
-          previousClip = null
+          completedClip = null
+          for (const resolve of clipWaiters) resolve(null)
+          clipWaiters.clear()
         }, { once: true })
       } catch (recorderError) {
         console.warn("Local event buffer is unavailable", recorderError)
       }
+    }
+
+    const nextCompletedClip = (capturedAt: number) => {
+      if (completedClip && completedClip.completedAt >= capturedAt) return Promise.resolve(completedClip.blob)
+      return new Promise<Blob | null>((resolve) => {
+        let settled = false
+        const finish = (clip: Blob | null) => {
+          if (settled) return
+          settled = true
+          window.clearTimeout(timeout)
+          clipWaiters.delete(finish)
+          resolve(clip)
+        }
+        const timeout = window.setTimeout(() => finish(completedClip?.blob ?? null), 6_000)
+        clipWaiters.add(finish)
+      })
+    }
+
+    captureRef.current = async () => {
+      if (!runningRef.current || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) throw new Error("Camera is not ready")
+      const capturedAt = Date.now()
+      const currentDetections = [...liveDetectionsRef.current]
+      const proof = document.createElement("canvas")
+      proof.width = Math.min(640, video.videoWidth)
+      proof.height = Math.round(proof.width * video.videoHeight / video.videoWidth)
+      proof.getContext("2d")?.drawImage(video, 0, 0, proof.width, proof.height)
+      const frameBlob = await new Promise<Blob | null>((resolve) => proof.toBlob(resolve, "image/jpeg", 0.72))
+      const clipBlob = await nextCompletedClip(capturedAt)
+      let bestFrameKey: string | undefined
+      let clipKey: string | undefined
+      if (frameBlob) {
+        const grant = await issueEvidenceWrite({ householdId: activeHouseholdId, contentType: "image/jpeg", kind: "frame" })
+        const response = await fetch("/api/evidence", { method: "POST", headers: { Authorization: `Bearer ${grant.token}`, "Content-Type": "image/jpeg" }, body: frameBlob })
+        if (response.ok) bestFrameKey = (await response.json() as { key?: string }).key
+      }
+      if (clipBlob) {
+        const contentType = clipBlob.type.split(";", 1)[0] || "video/webm"
+        const grant = await issueEvidenceWrite({ householdId: activeHouseholdId, contentType, kind: "clip" })
+        const response = await fetch("/api/evidence", { method: "POST", headers: { Authorization: `Bearer ${grant.token}`, "Content-Type": contentType }, body: clipBlob })
+        if (response.ok) clipKey = (await response.json() as { key?: string }).key
+      }
+      const labels = [...new Set(currentDetections.map((detection) => detection.label.toLowerCase()))]
+      await rememberObservation({
+        householdId: activeHouseholdId, patientUserId: userId, eventType: "activity",
+        description: labels.length ? `Five-second camera memory containing ${labels.join(", ")}.` : "Five-second camera memory with movement.",
+        objectLabels: labels, occurredAt: capturedAt, bestFrameKey, clipKey, provenance: "camera",
+        boxes: currentDetections.map((detection) => ({ label: detection.label, confidence: detection.score, x: detection.box.x / video.videoWidth, y: detection.box.y / video.videoHeight, width: detection.box.width / video.videoWidth, height: detection.box.height / video.videoHeight })),
+      })
     }
 
     const detect = async () => {
@@ -342,9 +410,12 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
                 || centerY - previousPerson.centerY >= 0.12))
             if (rapidPostureChange) rapidPostureChangeUntil = now + 6_000
             lowPosture = aspect >= 1 && bottom >= 0.7
+            if (lowPosture) lowPostureStartedAt ||= now
+            else lowPostureStartedAt = 0
             previousPerson = { aspect, centerY, at: now }
           } else if (previousPerson && now - previousPerson.at > 2_000) {
             previousPerson = null
+            lowPostureStartedAt = 0
           }
 
           if (motion.box) personalBurstRemaining = Math.max(personalBurstRemaining, 2)
@@ -401,16 +472,20 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
                   })[0]
                 const horizontal = normalizedX < 0.34 ? "left" : normalizedX > 0.66 ? "right" : "center"
                 const location = nearby ? `near the ${nearby.label}` : `in the ${horizontal} of the camera view`
-                const householdId = window.localStorage.getItem("tomo-household-id")
-                if (!householdId) continue
-                void fetch("/api/memories", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
-                  body: JSON.stringify({
+                void (async () => {
+                  const frameBlob = await (await fetch(evidenceDataUrl)).blob()
+                  const grant = await issueEvidenceWrite({ householdId: activeHouseholdId, contentType: "image/jpeg", kind: "frame" })
+                  const upload = await fetch("/api/evidence", { method: "POST", headers: { Authorization: `Bearer ${grant.token}`, "Content-Type": "image/jpeg" }, body: frameBlob })
+                  const bestFrameKey = upload.ok ? (await upload.json() as { key?: string }).key : undefined
+                  await rememberObservation({
+                    householdId: activeHouseholdId,
+                    patientUserId: userId,
+                    eventType: "object_placement",
+                    subjectKey: detection.label.toLowerCase(),
                     description: `${detection.label} were last seen ${location}.`,
-                    objectLabels: [detection.label.toLowerCase(), nearby?.label].filter(Boolean),
-                    occurredAt: new Date().toISOString(),
-                    evidenceDataUrl: evidenceDataUrl.length <= 120_000 ? evidenceDataUrl : undefined,
+                    objectLabels: [detection.label.toLowerCase(), nearby?.label].filter((label): label is string => Boolean(label)),
+                    occurredAt: Date.now(),
+                    bestFrameKey,
                     boxes: [{
                       label: detection.label,
                       confidence: detection.score,
@@ -419,10 +494,9 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
                       width: detection.box.width / video.videoWidth,
                       height: detection.box.height / video.videoHeight,
                     }],
-                    importance: "important",
                     provenance: "camera",
-                  }),
-                }).catch(() => undefined)
+                  })
+                })().catch(() => undefined)
               }
             }).catch((personalError) => {
               console.warn("Personal-object detector unavailable", personalError)
@@ -433,7 +507,8 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
           }
 
           if (performance.now() >= personalDetectionsExpireAt) personalDetections = []
-          setDetections([...liveDetections, ...personalDetections])
+          liveDetectionsRef.current = [...liveDetections, ...personalDetections]
+          setDetections(liveDetectionsRef.current)
 
           const fallSession = fallSessionRef.current
           if (fallSession && performance.now() - lastFallInferenceAt >= 700) {
@@ -453,20 +528,22 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
             const geometryConfirmed = geometryFallVotes.length >= 5
               && geometryFallVotes.filter(Boolean).length >= 4
             const confirmed = Boolean(visiblePerson
-              && performance.now() - lastMeaningfulMotionAt <= 8_000
-              && (modelConfirmed || geometryConfirmed))
+              && lowPosture
+              && lowPostureStartedAt > 0
+              && now - lowPostureStartedAt >= 2_800
+              && now - lastMeaningfulMotionAt <= 8_000
+              && modelConfirmed
+              && geometryConfirmed)
             const confidence = positiveVotes.length
               ? positiveVotes.reduce((total, vote) => total + vote.confidence, 0) / positiveVotes.length
               : 0
             setFallConfidence(confirmed ? confidence : 0)
             setRealFallActive(confirmed)
 
-            if (confirmed && !alertSent && Date.now() - lastAlertAt >= 10 * 60_000) {
+            if (confirmed && !alertSent) {
               alertSent = true
-              lastAlertAt = Date.now()
-              const householdId = window.localStorage.getItem("tomo-household-id")
-              if (householdId) {
-                const proofCanvas = document.createElement("canvas")
+              const fallConfirmedAt = Date.now()
+              const proofCanvas = document.createElement("canvas")
                 proofCanvas.width = Math.min(480, video.videoWidth)
                 proofCanvas.height = Math.round(proofCanvas.width * video.videoHeight / video.videoWidth)
                 const proofContext = proofCanvas.getContext("2d")
@@ -488,45 +565,32 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
                   proofContext.font = `600 ${Math.max(14, proofCanvas.width / 28)}px sans-serif`
                   proofContext.fillText("Possible fall", box.x * proofCanvas.width, Math.max(20, box.y * proofCanvas.height - 6))
                 }
-                const evidenceDataUrl = proofCanvas.toDataURL("image/jpeg", 0.45)
-                const currentClip = clipChunks.length > 1 ? new Blob([...clipChunks], { type: clipMimeType || "video/webm" }) : null
-                const bufferedClip = currentClip ?? previousClip
                 void (async () => {
-                  const alertResponse = await fetch("/api/alerts", {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
-                    body: JSON.stringify({
-                      type: "possible_fall",
-                      severity: "urgent",
-                      title: "Possible fall — please check",
-                      message: "TOMO detected a sustained fall-like posture and could not confirm that the person is okay.",
-                      evidenceDataUrl: evidenceDataUrl.length <= 120_000 ? evidenceDataUrl : undefined,
-                      fallBoxes,
-                      boxes: fallBoxes,
-                    }),
-                  })
-                  if (!alertResponse.ok || !bufferedClip) return
-                  const { alert } = await alertResponse.json() as { alert?: { id?: string } }
-                  if (!alert?.id) return
-                  const clipResponse = await fetch("/api/evidence", {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": bufferedClip.type || "video/webm",
-                      "x-tomo-household": householdId,
-                      "x-tomo-evidence-kind": "clip",
-                    },
-                    body: bufferedClip,
-                  })
-                  if (!clipResponse.ok) return
-                  const { key: videoKey } = await clipResponse.json() as { key?: string }
-                  if (!videoKey) return
-                  await fetch(`/api/alerts/${alert.id}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
-                    body: JSON.stringify({ videoKey, actor: "camera" }),
+                  const frameBlob = await new Promise<Blob | null>((resolve) => proofCanvas.toBlob(resolve, "image/jpeg", 0.72))
+                  let evidenceKey: string | undefined
+                  if (frameBlob) {
+                    const grant = await issueEvidenceWrite({ householdId: activeHouseholdId, contentType: "image/jpeg", kind: "frame" })
+                    const response = await fetch("/api/evidence", { method: "POST", headers: { Authorization: `Bearer ${grant.token}`, "Content-Type": "image/jpeg" }, body: frameBlob })
+                    if (response.ok) evidenceKey = (await response.json() as { key?: string }).key
+                  }
+                  const bufferedClip = await nextCompletedClip(fallConfirmedAt)
+                  let clipKey: string | undefined
+                  if (bufferedClip) {
+                    const contentType = bufferedClip.type.split(";", 1)[0] || "video/webm"
+                    const grant = await issueEvidenceWrite({ householdId: activeHouseholdId, contentType, kind: "clip" })
+                    const response = await fetch("/api/evidence", { method: "POST", headers: { Authorization: `Bearer ${grant.token}`, "Content-Type": contentType }, body: bufferedClip })
+                    if (response.ok) clipKey = (await response.json() as { key?: string }).key
+                  }
+                  await openPossibleFall({
+                    householdId: activeHouseholdId,
+                    patientUserId: userId,
+                    fingerprint: `${userId}:${fallConfirmedAt}`,
+                    message: "TOMO detected a sustained fall-like posture and could not confirm that the person is okay.",
+                    evidenceKey,
+                    clipKey,
+                    boxes: fallBoxes,
                   })
                 })().catch((evidenceError) => console.warn("Fall evidence could not be stored", evidenceError))
-              }
             }
             if (!confirmed && positiveVotes.length === 0) alertSent = false
           }
@@ -545,9 +609,10 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     }
 
     void detect()
-  }, [stopLoop])
+  }, [activeHouseholdId, issueEvidenceWrite, openPossibleFall, rememberObservation, stopLoop, userId])
 
   const start = React.useCallback(async () => {
+    if (!cameraEnabled) return
     if (!navigator.mediaDevices?.getUserMedia) {
       setState("unsupported")
       setError("This browser does not support live camera access.")
@@ -646,9 +711,16 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       setState("error")
       setError("The camera is live, but local object detection could not start. Check the connection and retry analysis.")
     }
-  }, [startInference, stopLoop])
+  }, [cameraEnabled, startInference, stopLoop])
 
   React.useEffect(() => {
+    if (!cameraEnabled) {
+      stopLoop()
+      streamRef.current?.getTracks().forEach((track) => track.stop())
+      streamRef.current = null
+      setStream(null)
+      return
+    }
     const startupTimer = window.setTimeout(() => void start(), 0)
     return () => {
       window.clearTimeout(startupTimer)
@@ -664,9 +736,19 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       ortRef.current = null
       runtimeRef.current = null
     }
-  }, [start, stopLoop])
+  }, [cameraEnabled, start, stopLoop])
 
-  const value = React.useMemo<LiveCameraContextValue>(() => ({ detections, realFallActive, fallConfidence, personalDetectorState, inferenceMs, state, runtime, error, stream, retry: start }), [detections, error, fallConfidence, inferenceMs, personalDetectorState, realFallActive, runtime, start, state, stream])
+  const captureFiveSecondMemory = React.useCallback(async () => {
+    setCaptureState("capturing")
+    try {
+      await captureRef.current()
+      setCaptureState("saved")
+      window.setTimeout(() => setCaptureState("idle"), 3_000)
+    } catch {
+      setCaptureState("error")
+    }
+  }, [])
+  const value = React.useMemo<LiveCameraContextValue>(() => ({ detections, realFallActive, fallConfidence, personalDetectorState, inferenceMs, state, runtime, error, stream, retry: start, captureFiveSecondMemory, captureState }), [captureFiveSecondMemory, captureState, detections, error, fallConfidence, inferenceMs, personalDetectorState, realFallActive, runtime, start, state, stream])
   return <LiveCameraContext.Provider value={value}>{children}</LiveCameraContext.Provider>
 }
 

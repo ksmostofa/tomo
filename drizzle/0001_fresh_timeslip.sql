@@ -1,1 +1,0 @@
-ALTER TABLE `memories` ADD `evidence_data_url` text;

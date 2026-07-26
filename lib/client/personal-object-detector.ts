@@ -25,15 +25,19 @@ async function loadDetector() {
     detectorPromise = import("@huggingface/transformers").then(async ({ env, pipeline }) => {
       env.allowLocalModels = false
       env.useBrowserCache = true
-      const accelerated = "gpu" in navigator
-      const loaded = await pipeline(
-        "zero-shot-object-detection",
-        "Xenova/owlvit-base-patch32",
-        accelerated
-          ? { device: "webgpu", dtype: "fp16" }
-          : { device: "wasm", dtype: "q8" },
-      )
-      return loaded as unknown as Detector
+      if ("gpu" in navigator) {
+        try {
+          const accelerated = await pipeline("zero-shot-object-detection", "Xenova/owlvit-base-patch32", { device: "webgpu", dtype: "fp32" })
+          return accelerated as unknown as Detector
+        } catch (error) {
+          console.warn("Accelerated personal-object detection is unavailable; using the compatible local runtime", error)
+        }
+      }
+      const compatible = await pipeline("zero-shot-object-detection", "Xenova/owlvit-base-patch32", { device: "wasm", dtype: "q8" })
+      return compatible as unknown as Detector
+    }).catch((error) => {
+      detectorPromise = null
+      throw error
     })
   }
   return detectorPromise

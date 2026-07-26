@@ -1,32 +1,22 @@
 sequenceDiagram
-  autonumber
-  participant Camera as Patient camera
-  participant Local as Local vision pipeline
-  participant API as Cloudflare Worker
-  participant Memory as D1 + R2
-  participant AI as Typed AI adapter
-  participant Patient as Patient UI
-  participant Caregiver as Caregiver UI
+  participant P as Patient browser
+  participant C as Convex + Better Auth
+  participant W as Cloudflare Worker
+  participant R as Private R2
+  participant G as Caregiver browser
 
-  Camera->>Local: Continuous frames
-  Local->>Local: Motion gate, detect, track
-  alt No meaningful movement
-    Local-->>Local: Delete temporary frames
-  else Important object event
-    Local->>API: Five-second event + selected evidence
-    API->>AI: Describe and embed approved evidence
-    AI-->>API: Structured description + embedding
-    API->>Memory: Store facts, frame key, boxes, provenance
-  else Possible fall
-    Local->>API: Immediate possible-fall event
-    API->>Memory: Persist incident and evidence
-    API-->>Caregiver: Alert with review actions
-  end
-  Patient->>API: Voice or typed question
-  API->>Memory: Hybrid semantic search
-  Memory-->>API: Ranked memories + supporting frame
-  API->>AI: Grounded bilingual response
-  AI-->>API: Answer + speech
-  API-->>Patient: Text, voice, frame, and object box
-  Caregiver->>API: Approve, edit, reject, or resolve
-  API->>Memory: Update trusted state and audit trail
+  P->>P: Detect objects and maintain rolling 5-second buffer
+  P->>P: Confirm movement/object event or temporal fall
+  P->>C: Request authenticated one-use write grant
+  C-->>P: Expiring token + immutable household key
+  P->>W: Upload selected frame/clip with token
+  W->>C: Consume grant through server secret
+  C-->>W: Authorized key and content type
+  W->>R: Store private evidence
+  P->>C: Save structured memory or alert with R2 key
+  C-->>G: Realtime household update
+  G->>C: Request one-use read grant
+  G->>W: Read evidence with token
+  W->>C: Consume and authorize linked key
+  W->>R: Fetch object
+  R-->>G: Private no-store media

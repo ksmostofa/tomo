@@ -5,6 +5,7 @@
 // Caregiver starts in the evidence-focused care inbox and can open Ask TOMO.
 
 import * as React from "react"
+import { useAction, useMutation, useQuery } from "convex/react"
 import {
   Activity,
   AlertTriangle,
@@ -81,6 +82,10 @@ import { Separator } from "@/components/ui/separator"
 import { Spinner } from "@/components/ui/spinner"
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { cn } from "@/lib/utils"
+import { classifyChatIntent } from "@/lib/shared/chat-intent"
+import { copy, type TomoLocale } from "@/lib/shared/tomo-copy"
+import { api } from "@/convex/_generated/api"
+import { useTomoHousehold } from "./tomo-household-context"
 import { LiveCameraProvider, LiveCameraView, useLiveCamera } from "@/components/live-camera-provider"
 
 type Role = "patient" | "caregiver"
@@ -90,6 +95,28 @@ type VoiceState = "ready" | "listening"
 type TurnStage = "idle" | "understanding" | "searching" | "retrieving" | "answering" | "done"
 type AlertState = "open" | "checking" | "safe"
 type ApprovalState = "pending" | "approved" | "rejected"
+
+const TomoLocaleContext = React.createContext<{ locale: TomoLocale; setLocale: (locale: TomoLocale) => void }>({ locale: "en", setLocale: () => undefined })
+
+function useTomoLocale() {
+  const value = React.useContext(TomoLocaleContext)
+  return { ...value, t: copy[value.locale] }
+}
+
+function TomoLocaleProvider({ children }: { children: React.ReactNode }) {
+  const [locale, setLocaleState] = React.useState<TomoLocale>("en")
+  React.useEffect(() => {
+    const stored = window.localStorage.getItem("tomo-voice-language") === "ja-JP" ? "ja" : "en"
+    setLocaleState(stored)
+    document.documentElement.lang = stored
+  }, [])
+  const setLocale = React.useCallback((next: TomoLocale) => {
+    setLocaleState(next)
+    document.documentElement.lang = next
+    window.localStorage.setItem("tomo-voice-language", next === "ja" ? "ja-JP" : "en-US")
+  }, [])
+  return <TomoLocaleContext.Provider value={{ locale, setLocale }}>{children}</TomoLocaleContext.Provider>
+}
 
 type StoredAlert = {
   id: string
@@ -157,6 +184,7 @@ type ChatTurn = {
   evidenceCount: number
   evidence: ChatEvidence[]
   repeated: boolean
+  memorySubmitted: boolean
   start: (query: string) => void
   reset: () => void
 }
@@ -179,16 +207,31 @@ type ChatApiResponse = {
   error?: string
 }
 
-function householdId() {
-  const key = "tomo-household-id"
-  const existing = window.localStorage.getItem(key)
-  if (existing) return existing
-  const created = `guest_${crypto.randomUUID().replaceAll("-", "")}`
-  window.localStorage.setItem(key, created)
-  return created
+function parseScheduleTime(text: string, now = new Date()) {
+  const match = text.match(/(?:at\s*)?(\d{1,2})(?::(\d{2}))?\s*(am|pm)?|(?:午前|午後)?\s*(\d{1,2})時(?:(\d{1,2})分)?/i)
+  if (!match) return null
+  const japanesePm = /午後/.test(text)
+  const japaneseAm = /午前/.test(text)
+  let hour = Number(match[1] ?? match[4])
+  const minute = Number(match[2] ?? match[5] ?? 0)
+  const meridiem = match[3]?.toLowerCase()
+  if ((meridiem === "pm" || japanesePm) && hour < 12) hour += 12
+  if ((meridiem === "am" || japaneseAm) && hour === 12) hour = 0
+  if (hour > 23 || minute > 59) return null
+  const result = new Date(now)
+  result.setSeconds(0, 0)
+  result.setHours(hour, minute)
+  if (/tomorrow|明日/i.test(text)) result.setDate(result.getDate() + 1)
+  else if (!/today|今日/i.test(text) && result.getTime() <= now.getTime()) result.setDate(result.getDate() + 1)
+  return result.getTime()
 }
 
 function useChatTurn(audience: Role): ChatTurn {
+  const { locale } = useTomoLocale()
+  const { householdId: activeHouseholdId, userId } = useTomoHousehold()
+  const respond = useAction(api.chat.respond)
+  const rememberMutation = useMutation(api.memories.remember)
+  const createSchedule = useMutation(api.schedules.create)
   const [query, setQuery] = React.useState("")
   const [stage, setStage] = React.useState<TurnStage>("idle")
   const [answer, setAnswer] = React.useState<string | null>(null)
@@ -196,6 +239,7 @@ function useChatTurn(audience: Role): ChatTurn {
   const [evidenceCount, setEvidenceCount] = React.useState(0)
   const [evidence, setEvidence] = React.useState<ChatEvidence[]>([])
   const [repeated, setRepeated] = React.useState(false)
+  const [memorySubmitted, setMemorySubmitted] = React.useState(false)
   const request = React.useRef<AbortController | null>(null)
 
   React.useEffect(() => () => request.current?.abort(), [])
@@ -212,38 +256,44 @@ function useChatTurn(audience: Role): ChatTurn {
     setEvidenceCount(0)
     setEvidence([])
     setRepeated(false)
+    setMemorySubmitted(false)
     setStage("understanding")
     void (async () => {
       try {
-        const remember = /^(remember\b|覚えて|記憶して)/i.test(message)
-        const rememberedText = message.replace(/^(?:remember(?: that)?|覚えて|記憶して)\s*/i, "")
+        const intent = classifyChatIntent(message, audience)
+        const remember = intent.kind === "memory"
+        setMemorySubmitted(remember)
+        const rememberedText = remember ? intent.statement : message
         const isSchedule = /\b(today|tomorrow|schedule|appointment|meeting|meet|leave by|at \d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b|今日|明日|予定|約束|会う|午前|午後|\d{1,2}時/i.test(rememberedText)
         const isMedication = /medicine|medication|薬|くすり/i.test(rememberedText)
         setStage("searching")
-        const response = await fetch(remember ? "/api/memories" : "/api/chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-tomo-household": householdId(),
-          },
-          body: JSON.stringify(remember
-            ? { description: rememberedText, objectLabels: isSchedule ? ["schedule"] : isMedication ? ["medicine"] : [], provenance: audience, importance: isMedication ? "safety" : "important" }
-            : { message, locale: /[\u3040-\u30ff\u3400-\u9fff]/.test(message) ? "ja" : "en", audience }),
-          signal: controller.signal,
-        })
         setStage("retrieving")
-        const payload = await response.json() as ChatApiResponse & { memory?: { description?: string } }
-        if (!response.ok) throw new Error(payload.error || "TOMO could not complete that request")
-        setEvidenceCount(payload.evidence?.length ?? 0)
-        setEvidence(payload.evidence ?? [])
-        setRepeated(Boolean(payload.repeated))
-        setProvider(payload.provider ?? (remember ? "d1" : "deterministic"))
+        let responseEvidence: ChatEvidence[] = []
+        let responseAnswer: string
+        let responseProvider = "convex"
+        let responseRepeated = false
+        if (remember) {
+          const startsAt = audience === "caregiver" && isSchedule ? parseScheduleTime(rememberedText) : null
+          if (startsAt) await createSchedule({ householdId: activeHouseholdId, patientUserId: userId, title: rememberedText, startsAt, reminderAt: startsAt - 30 * 60_000 })
+          const payload = await rememberMutation({ householdId: activeHouseholdId, patientUserId: userId, eventType: isMedication ? "safety" : isSchedule ? "routine" : "profile", description: rememberedText, objectLabels: isSchedule ? ["schedule"] : isMedication ? ["medicine"] : [], boxes: [], occurredAt: Date.now(), provenance: intent.provenance })
+          responseAnswer = payload.approvalState === "pending"
+            ? locale === "ja" ? `介護者に承認を依頼しました。承認後に信頼できる記憶として保存されます：${rememberedText}` : `I sent this to your caregiver for approval before it can become trusted memory: ${rememberedText}`
+            : startsAt
+              ? locale === "ja" ? `予定と信頼できる記憶に保存しました：${rememberedText}` : `I added this to the schedule and trusted memory: ${rememberedText}`
+              : locale === "ja" ? `介護者の信頼できる記憶として保存しました：${rememberedText}` : `I saved this as a trusted caregiver memory: ${rememberedText}`
+        } else {
+          const payload = await respond({ householdId: activeHouseholdId, message, locale, audience })
+          responseEvidence = payload.evidence.map((memory) => ({ id: memory._id, description: memory.description, occurredAt: new Date(memory.occurredAt).toISOString(), bestFrameKey: memory.bestFrameKey ?? null, evidenceDataUrl: null, boxes: memory.boxes }))
+          responseAnswer = payload.answer
+          responseProvider = payload.provider
+          responseRepeated = payload.repeated
+        }
+        setEvidenceCount(responseEvidence.length)
+        setEvidence(responseEvidence)
+        setRepeated(responseRepeated)
+        setProvider(responseProvider)
         setStage("answering")
-        setAnswer(remember
-          ? payload.requiresApproval
-            ? `I sent this to your caregiver for approval before it can become trusted memory: ${payload.memory?.description ?? message}`
-            : `I saved this as a trusted caregiver memory: ${payload.memory?.description ?? message}`
-          : payload.answer ?? "I could not find a grounded answer.")
+        setAnswer(responseAnswer)
         setStage("done")
       } catch (error) {
         if (controller.signal.aborted) return
@@ -262,10 +312,11 @@ function useChatTurn(audience: Role): ChatTurn {
     setEvidenceCount(0)
     setEvidence([])
     setRepeated(false)
+    setMemorySubmitted(false)
     setStage("idle")
   }
 
-  return { query, stage, answer, provider, evidenceCount, evidence, repeated, start, reset }
+  return { query, stage, answer, provider, evidenceCount, evidence, repeated, memorySubmitted, start, reset }
 }
 
 function TomoMark({ className }: { className?: string }) {
@@ -276,46 +327,43 @@ function TomoMark({ className }: { className?: string }) {
 }
 
 function Brand() {
+  const { locale } = useTomoLocale()
   return (
     <div className="flex items-center gap-3" aria-label="TOMO home">
       <TomoMark className="size-10" />
       <div>
         <p className="text-lg font-semibold leading-none tracking-[-0.035em]">tomo</p>
-        <p className="mt-1 hidden text-xs text-muted-foreground sm:block">A familiar voice, close by.</p>
+        <p className="mt-1 hidden text-xs text-muted-foreground sm:block">{locale === "ja" ? "そばにいる、親しみのある声。" : "A familiar voice, close by."}</p>
       </div>
     </div>
   )
 }
 
 function RoleControl({ role, onRoleChange }: { role: Role; onRoleChange: (role: Role) => void }) {
+  const { t } = useTomoLocale()
+  const { roles } = useTomoHousehold()
+  if (roles.length < 2) return null
   return (
-    <Tabs value={role} onValueChange={(value) => onRoleChange(value as Role)} aria-label="Preview role">
+    <Tabs value={role} onValueChange={(value) => onRoleChange(value as Role)} aria-label="Account role">
       <TabsList>
-        <TabsTrigger value="patient" aria-label="Patient view"><MessageCircle /><span className="hidden sm:inline">Patient</span></TabsTrigger>
-        <TabsTrigger value="caregiver" className="relative" aria-label="Caregiver view"><UsersRound /><span className="hidden sm:inline">Caregiver</span></TabsTrigger>
+        <TabsTrigger value="patient" aria-label="Patient view"><MessageCircle /><span className="hidden sm:inline">{t.patient}</span></TabsTrigger>
+        <TabsTrigger value="caregiver" className="relative" aria-label="Caregiver view"><UsersRound /><span className="hidden sm:inline">{t.caregiver}</span></TabsTrigger>
       </TabsList>
     </Tabs>
   )
 }
 
 function LanguageButton() {
-  const [language, setLanguage] = React.useState<"EN" | "日本語">("EN")
-  React.useEffect(() => {
-    queueMicrotask(() => setLanguage(window.localStorage.getItem("tomo-voice-language") === "ja-JP" ? "日本語" : "EN"))
-  }, [])
-  function toggle() {
-    const next = language === "EN" ? "日本語" : "EN"
-    setLanguage(next)
-    window.localStorage.setItem("tomo-voice-language", next === "日本語" ? "ja-JP" : "en-US")
-  }
+  const { locale, setLocale, t } = useTomoLocale()
   return (
-    <Button variant="ghost" className="h-10" onClick={toggle} aria-label="Switch voice language">
-      <Languages /> {language}
+    <Button variant="ghost" className="h-10" onClick={() => setLocale(locale === "en" ? "ja" : "en")} aria-label={t.languageLabel}>
+      <Languages /> {locale === "en" ? "日本語" : "EN"}
     </Button>
   )
 }
 
 function CallYuki({ prominent = false }: { prominent?: boolean }) {
+  const { t } = useTomoLocale()
   const [number, setNumber] = React.useState("")
   const [savedNumber, setSavedNumber] = React.useState("")
   React.useEffect(() => {
@@ -334,7 +382,7 @@ function CallYuki({ prominent = false }: { prominent?: boolean }) {
   return (
     <Dialog>
       <DialogTrigger render={<Button variant={prominent ? "default" : "outline"} size="lg" className={cn("min-h-12", prominent && "px-6 text-base")} />}>
-        <Phone /> Call Yuki
+        <Phone /> {t.callYuki}
       </DialogTrigger>
       <DialogContent>
         <DialogHeader><DialogTitle>Call Yuki</DialogTitle><DialogDescription>{savedNumber ? "Your caregiver contact is ready." : "Add Yuki’s phone number on this device before calling."}</DialogDescription></DialogHeader>
@@ -373,7 +421,7 @@ function CameraDialogContent({ expanded = false }: { expanded?: boolean }) {
 }
 
 function LiveCameraPanel() {
-  const { detections, state } = useLiveCamera()
+  const { captureFiveSecondMemory, captureState, detections, state } = useLiveCamera()
   const stateLabel = state === "live" ? "Live" : state === "blocked" ? "Permission needed" : state === "error" ? "Paused" : "Starting"
   return (
     <Card>
@@ -384,6 +432,9 @@ function LiveCameraPanel() {
           {detections.map((detection) => <Badge key={detection.id} variant="outline">{detection.label} · {Math.round(detection.score * 100)}%</Badge>)}
           {state === "live" && detections.length === 0 && <p className="text-sm text-muted-foreground">No objects above the confidence threshold in this frame.</p>}
         </div>
+        <Button className="mt-4" variant="outline" disabled={state !== "live" || captureState === "capturing"} onClick={() => void captureFiveSecondMemory()}>
+          <Camera /> {captureState === "capturing" ? "Capturing five-second memory…" : captureState === "saved" ? "Memory saved" : captureState === "error" ? "Try five-second capture again" : "Save a five-second memory"}
+        </Button>
       </CardContent>
     </Card>
   )
@@ -410,6 +461,7 @@ function StatusRow({ icon, label, detail, status }: { icon: React.ReactNode; lab
 }
 
 function VoiceOrb({ state, onActivate, size = "large" }: { state: VoiceState; onActivate: () => void; size?: "small" | "large" }) {
+  const { locale, t } = useTomoLocale()
   return (
     <div className="flex flex-col items-center gap-4">
       <Button
@@ -420,23 +472,18 @@ function VoiceOrb({ state, onActivate, size = "large" }: { state: VoiceState; on
       >
         <Mic className={size === "large" ? "size-9" : "size-5"} />
       </Button>
-      {size === "large" && <div className="text-center" aria-live="polite"><p className="text-lg font-semibold">{state === "listening" ? "I’m listening" : "Tap to talk"}</p><p className="mt-1 text-sm text-muted-foreground">{state === "listening" ? "Take your time" : "English or Japanese is okay"}</p></div>}
+      {size === "large" && <div className="text-center" aria-live="polite"><p className="text-lg font-semibold">{state === "listening" ? locale === "ja" ? "聞いています" : "I’m listening" : t.tapToTalk}</p><p className="mt-1 text-sm text-muted-foreground">{state === "listening" ? locale === "ja" ? "ゆっくり話してください" : "Take your time" : locale === "ja" ? "日本語でも英語でも大丈夫です" : "English or Japanese is okay"}</p></div>}
     </div>
   )
 }
 
 function TodayCard() {
-  const [memory, setMemory] = React.useState<StoredMemory | null>(null)
-  React.useEffect(() => {
-    const headers = { "x-tomo-household": householdId() }
-    void fetch("/api/memories?q=schedule", { headers })
-      .then(async (response) => response.ok ? await response.json() as { memories: StoredMemory[] } : { memories: [] })
-      .then((payload) => setMemory(payload.memories[0] ?? null))
-      .catch(() => setMemory(null))
-  }, [])
+  const { householdId: activeHouseholdId } = useTomoHousehold()
+  const schedules = useQuery(api.schedules.upcoming, { householdId: activeHouseholdId })
+  const next = schedules?.find((schedule) => schedule.status === "scheduled")
   return (
     <Card size="sm">
-      <CardContent className="flex items-center gap-3"><span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground"><CalendarDays className="size-5" /></span><div className="min-w-0 flex-1"><p className="font-medium">{memory ? "Confirmed plan" : "No confirmed plans yet"}</p><p className="text-sm text-muted-foreground">{memory?.description ?? "A caregiver can add a schedule through Ask TOMO."}</p></div></CardContent>
+      <CardContent className="flex items-center gap-3"><span className="flex size-11 shrink-0 items-center justify-center rounded-2xl bg-secondary text-secondary-foreground"><CalendarDays className="size-5" /></span><div className="min-w-0 flex-1"><p className="font-medium">{next ? "Confirmed plan" : "No confirmed plans yet"}</p><p className="text-sm text-muted-foreground">{next ? `${next.title} · ${new Date(next.startsAt).toLocaleString()}` : "A caregiver can add a schedule through Ask TOMO."}</p></div></CardContent>
     </Card>
   )
 }
@@ -477,6 +524,7 @@ function IdleCameraCard() {
 }
 
 function PatientHome({ role, onRoleChange, onAsk, onOpenChat }: { role: Role; onRoleChange: (role: Role) => void; onAsk: (query: string) => void; onOpenChat: () => void }) {
+  const { locale, t } = useTomoLocale()
   const [voiceState, setVoiceState] = React.useState<VoiceState>("ready")
   const [liveTranscript, setLiveTranscript] = React.useState("")
   const recognitionRef = React.useRef<BrowserSpeechRecognition | null>(null)
@@ -529,8 +577,8 @@ function PatientHome({ role, onRoleChange, onAsk, onOpenChat }: { role: Role; on
       <header><div className="mx-auto flex min-h-20 max-w-7xl items-center justify-between gap-3 px-4 sm:px-6 lg:px-8"><Brand /><div className="flex items-center gap-2"><LanguageButton /><RoleControl role={role} onRoleChange={onRoleChange} /></div></div></header>
       <section className="mx-auto grid min-h-[calc(100dvh-5rem)] max-w-7xl place-items-center px-4 py-6 sm:px-6 lg:px-8">
         <div className="grid w-full items-center gap-8 lg:grid-cols-[minmax(14rem,.7fr)_minmax(24rem,1fr)_minmax(14rem,.7fr)]">
-          <div className="order-2 space-y-3 lg:order-1"><p className="text-center text-sm font-medium text-muted-foreground lg:text-left">Today</p><TodayCard /><WeatherCard /></div>
-          <div className="order-1 flex flex-col items-center text-center lg:order-2"><Badge variant="outline" className="mb-5 bg-background"><ShieldCheck /> Camera processing locally</Badge><p className="text-sm font-medium text-muted-foreground">Good morning, Keiko</p><h1 className="mt-2 max-w-xl text-4xl font-semibold tracking-[-.055em] sm:text-5xl">What can I help you remember?</h1><div className="my-8"><VoiceOrb state={voiceState} onActivate={beginVoiceQuestion} />{liveTranscript && <p className="mt-5 max-w-lg text-xl" aria-live="polite">“{liveTranscript}”</p>}</div><div className="flex flex-wrap items-center justify-center gap-2"><Button variant="outline" size="lg" className="min-h-12" disabled={!liveTranscript} onClick={() => { if (liveTranscript) onAsk(liveTranscript) }}><Volume2 /> Repeat</Button><Button variant="outline" size="lg" className="min-h-12" onClick={onOpenChat}><MessageCircle /> Type instead</Button><CallYuki prominent /></div></div>
+          <div className="order-2 space-y-3 lg:order-1"><p className="text-center text-sm font-medium text-muted-foreground lg:text-left">{t.today}</p><TodayCard /><WeatherCard /></div>
+          <div className="order-1 flex flex-col items-center text-center lg:order-2"><Badge variant="outline" className="mb-5 bg-background"><ShieldCheck /> {locale === "ja" ? "カメラは端末内で処理中" : "Camera processing locally"}</Badge><p className="text-sm font-medium text-muted-foreground">{locale === "ja" ? "おはようございます、ケイコさん" : "Good morning, Keiko"}</p><h1 className="mt-2 max-w-xl text-4xl font-semibold tracking-[-.055em] sm:text-5xl">{locale === "ja" ? "今日は何をお手伝いしましょう？" : "How can I help today?"}</h1><div className="my-8"><VoiceOrb state={voiceState} onActivate={beginVoiceQuestion} />{liveTranscript && <p className="mt-5 max-w-lg text-xl" aria-live="polite">“{liveTranscript}”</p>}</div><div className="flex flex-wrap items-center justify-center gap-2"><Button variant="outline" size="lg" className="min-h-12" disabled={!liveTranscript} onClick={() => { if (liveTranscript) onAsk(liveTranscript) }}><Volume2 /> {t.repeat}</Button><Button variant="outline" size="lg" className="min-h-12" onClick={onOpenChat}><MessageCircle /> {t.typeInstead}</Button><CallYuki prominent /></div></div>
           <div className="order-3 space-y-3"><IdleCameraCard /><div className="flex justify-center"><CameraStatus compact /></div></div>
         </div>
       </section>
@@ -539,16 +587,32 @@ function PatientHome({ role, onRoleChange, onAsk, onOpenChat }: { role: Role; on
 }
 
 function EvidenceFrame({ evidence }: { evidence: ChatEvidence }) {
+  const { householdId } = useTomoHousehold()
+  const issueEvidenceRead = useMutation(api.evidence.issueRead)
+  const [frameUrl, setFrameUrl] = React.useState<string | null>(evidence.evidenceDataUrl)
+  React.useEffect(() => {
+    if (!evidence.bestFrameKey) { setFrameUrl(evidence.evidenceDataUrl); return }
+    let active = true
+    let objectUrl: string | null = null
+    void issueEvidenceRead({ householdId, objectKey: evidence.bestFrameKey })
+      .then((grant) => fetch("/api/evidence", { headers: { Authorization: `Bearer ${grant.token}` } }))
+      .then(async (response) => {
+        if (!response.ok) throw new Error("Evidence is unavailable")
+        objectUrl = URL.createObjectURL(await response.blob())
+        if (active) setFrameUrl(objectUrl)
+      }).catch(() => { if (active) setFrameUrl(null) })
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [evidence.bestFrameKey, evidence.evidenceDataUrl, householdId, issueEvidenceRead])
   const observed = new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(new Date(evidence.occurredAt))
   return (
     <Card size="sm" className="w-full">
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div className="min-w-0 flex-1"><CardTitle>Latest supporting frame</CardTitle><CardDescription>Observed {observed}</CardDescription></div><Badge className="shrink-0" variant="secondary"><Camera /> Evidence</Badge></CardHeader>
       <CardContent>
-        {evidence.evidenceDataUrl ? (
+        {frameUrl ? (
           <div className="relative aspect-video min-h-52 overflow-hidden rounded-3xl bg-muted">
             {/* Camera evidence is an inline, ephemeral data URL returned by TOMO's own API. */}
             {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img src={evidence.evidenceDataUrl} alt={evidence.description} className="size-full object-contain" />
+            <img src={frameUrl} alt={evidence.description} className="size-full object-contain" />
             {evidence.boxes.map((box, index) => (
               <div
                 key={`${box.label}-${index}`}
@@ -652,7 +716,8 @@ function ChatComposer({ placeholder, onSubmit, patient = false }: { placeholder:
 }
 
 function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: ChatTurn; onBack: () => void }) {
-  const memorySubmitted = /^(remember\b|覚えて|記憶して)/i.test(turn.query)
+  const memorySubmitted = turn.memorySubmitted
+  const { locale, t } = useTomoLocale()
 
   React.useEffect(() => {
     if (audience !== "patient" || turn.stage !== "done" || !turn.answer || turn.provider === "error" || !("speechSynthesis" in window)) return
@@ -704,7 +769,7 @@ function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: ChatT
               <MessageScrollerButton />
             </MessageScroller>
           </MessageScrollerProvider>
-          <ChatComposer placeholder={audience === "patient" ? "Ask TOMO anything" : "Ask or tell TOMO something"} onSubmit={turn.start} patient={audience === "patient"} />
+          <ChatComposer placeholder={audience === "patient" ? t.askAnything : locale === "ja" ? "TOMOに質問したり、覚えてほしいことを話してください" : "Ask or tell TOMO something"} onSubmit={turn.start} patient={audience === "patient"} />
         </Card>
       </div>
     </div>
@@ -712,27 +777,26 @@ function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: ChatT
 }
 
 function CaregiverNav({ current, onChange }: { current: CaregiverView; onChange: (view: CaregiverView) => void }) {
+  const { t } = useTomoLocale()
   return (
     <nav className="grid gap-1" aria-label="Caregiver sections">
-      <Button variant={current === "inbox" ? "default" : "ghost"} className="h-11 justify-start rounded-2xl" onClick={() => onChange("inbox")}><Bell /> Care inbox</Button>
-      <Button variant={current === "chat" ? "default" : "ghost"} className="h-11 justify-start rounded-2xl" onClick={() => onChange("chat")}><MessageCircle /> Ask TOMO</Button>
+      <Button variant={current === "inbox" ? "default" : "ghost"} className="h-11 justify-start rounded-2xl" onClick={() => onChange("inbox")}><Bell /> {t.careInbox}</Button>
+      <Button variant={current === "chat" ? "default" : "ghost"} className="h-11 justify-start rounded-2xl" onClick={() => onChange("chat")}><MessageCircle /> {t.askTomo}</Button>
     </nav>
   )
 }
 
 function ApprovalCard({ approval, onResolved }: { approval: StoredApproval | null; onResolved: () => void }) {
+  const { householdId: activeHouseholdId } = useTomoHousehold()
+  const resolveApproval = useMutation(api.approvals.resolve)
   const [busy, setBusy] = React.useState(false)
 
   async function resolve(state: "approved" | "rejected") {
     if (!approval || busy) return
     setBusy(true)
     try {
-      const response = await fetch(`/api/approvals/${approval.id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json", "x-tomo-household": householdId() },
-        body: JSON.stringify({ state, resolvedBy: "Yuki" }),
-      })
-      if (response.ok) onResolved()
+      await resolveApproval({ householdId: activeHouseholdId, approvalId: approval.id as never, decision: state })
+      onResolved()
     } finally {
       setBusy(false)
     }
@@ -745,14 +809,28 @@ function ApprovalCard({ approval, onResolved }: { approval: StoredApproval | nul
 }
 
 function AlertEvidence({ storedAlert }: { storedAlert: StoredAlert }) {
+  const { householdId: activeHouseholdId } = useTomoHousehold()
+  const issueEvidenceRead = useMutation(api.evidence.issueRead)
   const [clipUrl, setClipUrl] = React.useState<string | null>(null)
+  const [frameUrl, setFrameUrl] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (!storedAlert.evidenceKey) { setFrameUrl(null); return }
+    let active = true
+    let objectUrl: string | null = null
+    void issueEvidenceRead({ householdId: activeHouseholdId, objectKey: storedAlert.evidenceKey }).then((grant) => fetch("/api/evidence", { headers: { Authorization: `Bearer ${grant.token}` } })).then(async (response) => {
+      if (!response.ok) return
+      objectUrl = URL.createObjectURL(await response.blob())
+      if (active) setFrameUrl(objectUrl)
+    }).catch(() => undefined)
+    return () => { active = false; if (objectUrl) URL.revokeObjectURL(objectUrl) }
+  }, [activeHouseholdId, issueEvidenceRead, storedAlert.evidenceKey])
   React.useEffect(() => {
     if (!storedAlert.videoKey) return
     let active = true
     let objectUrl: string | null = null
-    void fetch(`/api/evidence?key=${encodeURIComponent(storedAlert.videoKey)}`, {
-      headers: { "x-tomo-household": householdId() },
-    }).then(async (response) => {
+    void issueEvidenceRead({ householdId: activeHouseholdId, objectKey: storedAlert.videoKey }).then((grant) => fetch("/api/evidence", {
+      headers: { Authorization: `Bearer ${grant.token}` },
+    })).then(async (response) => {
       if (!response.ok) return
       objectUrl = URL.createObjectURL(await response.blob())
       if (active) setClipUrl(objectUrl)
@@ -761,17 +839,17 @@ function AlertEvidence({ storedAlert }: { storedAlert: StoredAlert }) {
       active = false
       if (objectUrl) URL.revokeObjectURL(objectUrl)
     }
-  }, [storedAlert.videoKey])
+  }, [activeHouseholdId, issueEvidenceRead, storedAlert.videoKey])
 
-  const hasEvidence = Boolean(storedAlert.evidenceDataUrl || storedAlert.videoKey)
+  const hasEvidence = Boolean(storedAlert.evidenceKey || storedAlert.evidenceDataUrl || storedAlert.videoKey)
   return (
     <Card>
       <CardHeader><CardTitle>Safety evidence</CardTitle><CardDescription>{hasEvidence ? "Captured only for this possible-fall review." : "No supporting frame was captured for this event."}</CardDescription></CardHeader>
       <CardContent className="space-y-4">
-        {storedAlert.evidenceDataUrl ? <div className="relative overflow-hidden rounded-3xl bg-muted">
+        {frameUrl || storedAlert.evidenceDataUrl ? <div className="relative overflow-hidden rounded-3xl bg-muted">
           {/* Alert evidence is an inline, bounded data URL returned by TOMO's own API. */}
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src={storedAlert.evidenceDataUrl} alt="Marked camera frame supporting this possible-fall alert" className="aspect-video size-full object-contain" />
+          <img src={frameUrl ?? storedAlert.evidenceDataUrl ?? ""} alt="Marked camera frame supporting this possible-fall alert" className="aspect-video size-full object-contain" />
           {storedAlert.boxes.map((box, index) => <div key={`${box.label}-${index}`} className="pointer-events-none absolute border-2 border-destructive" style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}><Badge variant="destructive" className="absolute -top-6 left-0">{box.label} · {Math.round(box.confidence * 100)}%</Badge></div>)}
         </div> : <div className="flex min-h-64 items-center justify-center rounded-3xl bg-muted text-center"><div><Camera className="mx-auto size-7 text-muted-foreground" /><p className="mt-3 font-medium">No supporting frame</p><p className="mt-1 text-sm text-muted-foreground">The detector event was saved without a usable image.</p></div></div>}
         {clipUrl ? <video controls playsInline preload="metadata" src={clipUrl} className="aspect-video w-full rounded-3xl bg-black" aria-label="Short possible-fall evidence clip" /> : storedAlert.videoKey ? <p className="text-sm text-muted-foreground">Loading the protected event clip…</p> : null}
@@ -781,6 +859,10 @@ function AlertEvidence({ storedAlert }: { storedAlert: StoredAlert }) {
 }
 
 function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role; onRoleChange: (role: Role) => void; view: CaregiverView; onViewChange: (view: CaregiverView) => void }) {
+  const { householdId: activeHouseholdId } = useTomoHousehold()
+  const convexAlerts = useQuery(api.alerts.list, { householdId: activeHouseholdId })
+  const convexApprovals = useQuery(api.approvals.pending, { householdId: activeHouseholdId })
+  const setAlertStatus = useMutation(api.alerts.setStatus)
   const [alerts, setAlerts] = React.useState<StoredAlert[]>([])
   const [storedAlert, setStoredAlert] = React.useState<StoredAlert | null>(null)
   const [storedApproval, setStoredApproval] = React.useState<StoredApproval | null>(null)
@@ -789,33 +871,23 @@ function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role
   const resolved = alertState === "safe"
 
   React.useEffect(() => {
-    const headers = { "x-tomo-household": householdId() }
-    void Promise.all([
-      fetch("/api/alerts", { headers }).then(async (response) => response.ok ? await response.json() as { alerts: StoredAlert[] } : { alerts: [] }),
-      fetch("/api/approvals", { headers }).then(async (response) => response.ok ? await response.json() as { approvals: StoredApproval[] } : { approvals: [] }),
-    ]).then(([alertPayload, approvalPayload]) => {
-      const receivedAlerts = alertPayload.alerts
-      const possibleFall = receivedAlerts.find((alert) => alert.type === "possible_fall") ?? null
-      const pendingApproval = approvalPayload.approvals.find((approval) => approval.state === "pending") ?? null
-      setAlerts(receivedAlerts)
-      setStoredAlert(possibleFall)
-      setStoredApproval(pendingApproval)
-    }).catch(() => undefined)
-  }, [refreshToken])
+    if (!convexAlerts || !convexApprovals) return
+    const receivedAlerts: StoredAlert[] = convexAlerts.map((alert) => ({ id: alert._id, type: alert.type, severity: alert.severity, status: alert.status, title: alert.title, message: alert.message, evidenceKey: alert.evidenceKey ?? null, evidenceDataUrl: null, videoKey: alert.clipKey ?? null, boxes: alert.boxes, createdAt: new Date(alert.createdAt).toISOString() }))
+    setAlerts(receivedAlerts)
+    setStoredAlert((current) => current ? receivedAlerts.find((alert) => alert.id === current.id) ?? receivedAlerts.find((alert) => alert.type === "possible_fall") ?? null : receivedAlerts.find((alert) => alert.type === "possible_fall") ?? null)
+    const approval = convexApprovals[0]
+    setStoredApproval(approval ? { id: approval._id, statement: approval.statement, state: approval.state } : null)
+  }, [convexAlerts, convexApprovals, refreshToken])
 
   async function updateAlert(status: "checking" | "resolved") {
     if (!storedAlert) return
-    const response = await fetch(`/api/alerts/${storedAlert.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", "x-tomo-household": householdId() },
-      body: JSON.stringify({ status, actor: "Yuki" }),
-    })
-    if (response.ok) setStoredAlert((current) => current ? { ...current, status } : current)
+    await setAlertStatus({ householdId: activeHouseholdId, alertId: storedAlert.id as never, status })
+    setStoredAlert((current) => current ? { ...current, status } : current)
   }
 
   return (
     <main className="min-h-dvh bg-background">
-      <header className="border-b"><div className="mx-auto flex min-h-20 max-w-[98rem] items-center justify-between gap-3 px-4 sm:px-6"><Brand /><div className="flex items-center gap-2"><Button variant="outline" onClick={() => onViewChange("chat")}><MessageCircle /> Ask TOMO</Button><RoleControl role={role} onRoleChange={onRoleChange} /><Avatar className="hidden sm:flex"><AvatarFallback>YK</AvatarFallback></Avatar></div></div></header>
+      <header className="border-b"><div className="mx-auto flex min-h-20 max-w-[98rem] items-center justify-between gap-3 px-4 sm:px-6"><Brand /><div className="flex items-center gap-2"><LanguageButton /><Button variant="outline" onClick={() => onViewChange("chat")}><MessageCircle /> Ask TOMO</Button><RoleControl role={role} onRoleChange={onRoleChange} /><Avatar className="hidden sm:flex"><AvatarFallback>YK</AvatarFallback></Avatar></div></div></header>
       <div className="mx-auto grid max-w-[98rem] lg:grid-cols-[15rem_minmax(0,1fr)] xl:grid-cols-[15rem_20rem_minmax(0,1fr)]">
         <aside className="hidden border-r p-5 lg:block"><CaregiverNav current={view} onChange={onViewChange} /><Card size="sm" className="mt-8"><CardContent><p className="text-sm font-medium">Camera connection</p><p className="mt-1 text-xs text-muted-foreground">Live state appears on the patient device.</p></CardContent></Card></aside>
         <aside className="hidden border-r p-5 xl:block">
@@ -842,13 +914,20 @@ function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role
 }
 
 function TomoExperience() {
-  const [role, setRole] = React.useState<Role>("patient")
+  const { roles } = useTomoHousehold()
+  const accountRole: Role = roles.includes("patient") ? "patient" : "caregiver"
+  const [role, setRole] = React.useState<Role>(accountRole)
   const [patientView, setPatientView] = React.useState<PatientView>("home")
   const [caregiverView, setCaregiverView] = React.useState<CaregiverView>("inbox")
   const patientTurn = useChatTurn("patient")
   const caregiverTurn = useChatTurn("caregiver")
 
+  React.useEffect(() => {
+    if (!roles.includes(role)) setRole(accountRole)
+  }, [accountRole, role, roles])
+
   function changeRole(nextRole: Role) {
+    if (!roles.includes(nextRole)) return
     setRole(nextRole)
     if (nextRole === "patient") setPatientView("home")
     if (nextRole === "caregiver") setCaregiverView("inbox")
@@ -869,5 +948,5 @@ function TomoExperience() {
 }
 
 export function TomoExperienceApp() {
-  return <LiveCameraProvider><TomoExperience /></LiveCameraProvider>
+  return <TomoLocaleProvider><LiveCameraProvider><TomoExperience /></LiveCameraProvider></TomoLocaleProvider>
 }

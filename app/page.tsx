@@ -1,5 +1,6 @@
 import type { Metadata } from "next"
-import { TomoExperienceApp } from "@/components/tomo-experience"
+import { TomoAuthGate } from "@/components/tomo-auth-gate"
+import { TomoConvexProvider } from "@/components/tomo-convex-provider"
 
 export const metadata: Metadata = {
   title: "Tomo — A familiar voice. A trusted connection.",
@@ -8,5 +9,5 @@ export const metadata: Metadata = {
 }
 
 export default function Home() {
-  return <TomoExperienceApp />
+  return <TomoConvexProvider><TomoAuthGate /></TomoConvexProvider>
 }
