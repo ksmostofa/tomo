@@ -56,6 +56,16 @@ export const alerts = sqliteTable("alerts", {
   title: text("title").notNull(),
   message: text("message").notNull(),
   evidenceKey: text("evidence_key"),
+  evidenceDataUrl: text("evidence_data_url"),
+  videoKey: text("video_key"),
+  boxes: text("boxes", { mode: "json" }).$type<Array<{
+    label: string;
+    confidence: number;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>>().notNull().default([]),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   resolvedAt: text("resolved_at"),
 }, (table) => [index("alerts_household_status_idx").on(table.householdId, table.status)]);

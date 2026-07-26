@@ -275,6 +275,41 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     let personalDetectionsExpireAt = 0
     let personalHistory: Array<Set<string>> = []
     const lastStored = new Map<string, { x: number; y: number; at: number }>()
+    let clipChunks: Blob[] = []
+    let previousClip: Blob | null = null
+    let clipRecorder: MediaRecorder | null = null
+    let clipMimeType = "video/webm"
+    if (typeof MediaRecorder !== "undefined" && video.srcObject instanceof MediaStream) {
+      try {
+        clipMimeType = ["video/webm;codecs=vp8", "video/webm"]
+          .find((type) => MediaRecorder.isTypeSupported(type)) ?? ""
+        const startClipSegment = () => {
+          if (!runningRef.current || !(video.srcObject instanceof MediaStream) || !video.srcObject.active) return
+          clipChunks = []
+          const recorder = new MediaRecorder(video.srcObject, clipMimeType ? { mimeType: clipMimeType, videoBitsPerSecond: 600_000 } : undefined)
+          clipRecorder = recorder
+          recorder.addEventListener("dataavailable", (event) => {
+            if (event.data.size) clipChunks.push(event.data)
+          })
+          recorder.addEventListener("stop", () => {
+            if (clipChunks.length) previousClip = new Blob([...clipChunks], { type: clipMimeType || "video/webm" })
+            if (runningRef.current && video.srcObject instanceof MediaStream && video.srcObject.active) startClipSegment()
+          }, { once: true })
+          recorder.start(1_000)
+          window.setTimeout(() => {
+            if (recorder.state !== "inactive") recorder.stop()
+          }, 5_000)
+        }
+        startClipSegment()
+        video.srcObject.getVideoTracks()[0]?.addEventListener("ended", () => {
+          if (clipRecorder?.state !== "inactive") clipRecorder?.stop()
+          clipChunks = []
+          previousClip = null
+        }, { once: true })
+      } catch (recorderError) {
+        console.warn("Local event buffer is unavailable", recorderError)
+      }
+    }
 
     const detect = async () => {
       if (!runningRef.current) return
@@ -430,16 +465,66 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
               lastAlertAt = Date.now()
               const householdId = window.localStorage.getItem("tomo-household-id")
               if (householdId) {
-                void fetch("/api/alerts", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
-                  body: JSON.stringify({
-                    type: "possible_fall",
-                    severity: "urgent",
-                    title: "Possible fall — please check",
-                    message: "TOMO detected a sustained fall-like posture and could not confirm that the person is okay.",
-                  }),
-                }).catch(() => undefined)
+                const proofCanvas = document.createElement("canvas")
+                proofCanvas.width = Math.min(480, video.videoWidth)
+                proofCanvas.height = Math.round(proofCanvas.width * video.videoHeight / video.videoWidth)
+                const proofContext = proofCanvas.getContext("2d")
+                proofContext?.drawImage(video, 0, 0, proofCanvas.width, proofCanvas.height)
+                const fallBoxes = visiblePerson ? [{
+                  label: "Person",
+                  confidence: Math.max(fallenScore, visiblePerson.score),
+                  x: visiblePerson.box.x / video.videoWidth,
+                  y: visiblePerson.box.y / video.videoHeight,
+                  width: visiblePerson.box.width / video.videoWidth,
+                  height: visiblePerson.box.height / video.videoHeight,
+                }] : []
+                if (proofContext && fallBoxes[0]) {
+                  const box = fallBoxes[0]
+                  proofContext.strokeStyle = "#dc2626"
+                  proofContext.lineWidth = Math.max(3, proofCanvas.width / 150)
+                  proofContext.strokeRect(box.x * proofCanvas.width, box.y * proofCanvas.height, box.width * proofCanvas.width, box.height * proofCanvas.height)
+                  proofContext.fillStyle = "#dc2626"
+                  proofContext.font = `600 ${Math.max(14, proofCanvas.width / 28)}px sans-serif`
+                  proofContext.fillText("Possible fall", box.x * proofCanvas.width, Math.max(20, box.y * proofCanvas.height - 6))
+                }
+                const evidenceDataUrl = proofCanvas.toDataURL("image/jpeg", 0.45)
+                const currentClip = clipChunks.length > 1 ? new Blob([...clipChunks], { type: clipMimeType || "video/webm" }) : null
+                const bufferedClip = currentClip ?? previousClip
+                void (async () => {
+                  const alertResponse = await fetch("/api/alerts", {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
+                    body: JSON.stringify({
+                      type: "possible_fall",
+                      severity: "urgent",
+                      title: "Possible fall — please check",
+                      message: "TOMO detected a sustained fall-like posture and could not confirm that the person is okay.",
+                      evidenceDataUrl: evidenceDataUrl.length <= 120_000 ? evidenceDataUrl : undefined,
+                      fallBoxes,
+                      boxes: fallBoxes,
+                    }),
+                  })
+                  if (!alertResponse.ok || !bufferedClip) return
+                  const { alert } = await alertResponse.json() as { alert?: { id?: string } }
+                  if (!alert?.id) return
+                  const clipResponse = await fetch("/api/evidence", {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": bufferedClip.type || "video/webm",
+                      "x-tomo-household": householdId,
+                      "x-tomo-evidence-kind": "clip",
+                    },
+                    body: bufferedClip,
+                  })
+                  if (!clipResponse.ok) return
+                  const { key: videoKey } = await clipResponse.json() as { key?: string }
+                  if (!videoKey) return
+                  await fetch(`/api/alerts/${alert.id}`, {
+                    method: "PATCH",
+                    headers: { "Content-Type": "application/json", "x-tomo-household": householdId },
+                    body: JSON.stringify({ videoKey, actor: "camera" }),
+                  })
+                })().catch((evidenceError) => console.warn("Fall evidence could not be stored", evidenceError))
               }
             }
             if (!confirmed && positiveVotes.length === 0) alertSent = false

@@ -158,7 +158,7 @@ sequenceDiagram
 
 1. **Fast local lane:** the camera, motion gate, object detector, temporal checks, and bounding-box rendering run in the browser. This path never waits for cloud AI.
 2. **Safety lane:** a fall-like posture must persist across time before TOMO creates a possible-fall event. The immediate caregiver alert is separate from slower video enrichment.
-3. **Memory lane:** only confirmed glasses/keys observations leave the live frame stream. A bounded JPEG, coordinates, structured facts, and provenance are stored in D1. Fall alerts currently store the event record without a retained image. R2 clips are a future upgrade.
+3. **Memory lane:** only confirmed important observations leave the live frame stream. Object memories retain a bounded JPEG, coordinates, structured facts, and provenance in D1. Confirmed possible-fall alerts retain a bounded marked JPEG in D1 and attach the preceding local event window through private R2.
 4. **Retrieval lane:** explicit glasses/keys questions select the newest trusted observation first. TOMO records a retrieval receipt; asking again against the same observation produces a gentle follow-up, while a newer observation replaces it. Other questions use hybrid lexical/vector retrieval and Qwen grounding.
 5. **Approval lane:** caregiver memories are trusted immediately. Sensitive patient statements remain pending until a caregiver approves or edits them.
 6. **Voice lane:** compatible browsers provide English/Japanese speech recognition and synthesis; typed chat is always available. Provider-grade realtime voice is not implemented yet.
@@ -191,7 +191,7 @@ type MemoryEvent = {
 }
 ```
 
-Routine frames are not retained. Current retained JPEGs are capped before entering D1. When R2 is enabled, clips must use short retention, private object keys, authenticated household authorization, and an audit trail.
+Routine frames are not retained. Retained JPEGs are capped before entering D1. Event clips use private R2 object keys and household-scoped retrieval; production authentication and automated lifecycle expiry remain required before real patient use.
 
 ## Technology stack
 
@@ -259,12 +259,12 @@ This repository is under active construction. The README describes the approved 
 | English/Japanese browser speech input/output | Working on compatible browsers |
 | Temporal Project Memoria fall model and D1 alert trigger | Working locally; visible-person gate, stronger-upright suppression, temporal consensus, geometry fallback, and 10-minute deduplication |
 | Motion-gated selected-frame capture | **Live** for confirmed glasses/keys observations |
-| Full five-second event clip retention | Not enabled; requires R2 |
+| Rolling local event buffer and protected fall clip | Working; six one-second chunks are held locally and uploaded to private R2 only after confirmation |
 | D1 structured + hybrid semantic memory | **Live** |
 | D1 fall-alert status and caregiver approval workflow | **Live** |
 | Cloudflare-hosted Qwen chat and embeddings | **Live** |
 | Qwen Cloud sponsor API | Adapter ready; credentials unavailable |
-| R2 evidence upload | Adapter ready; account subscription/binding not enabled |
+| R2 evidence upload | Working with private `EVIDENCE` binding and household-scoped retrieval |
 | Email delivery | Adapter ready; sender credentials unavailable |
 | Authentication and household grants | Future production gate |
 

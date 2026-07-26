@@ -75,6 +75,25 @@ test("gates fall confirmation on a visible person and stronger fallen evidence",
   assert.doesNotMatch(ui, /label="Fall safety"/)
 })
 
+test("captures, stores, links, and renders real fall evidence", async () => {
+  const [camera, alertsRoute, schema, caregiver] = await Promise.all([
+    readFile(new URL("components/live-camera-provider.tsx", root), "utf8"),
+    readFile(new URL("app/api/alerts/route.ts", root), "utf8"),
+    readFile(new URL("db/schema.ts", root), "utf8"),
+    readFile(new URL("components/tomo-experience.tsx", root), "utf8"),
+  ])
+  assert.match(camera, /new MediaRecorder/)
+  assert.match(camera, /evidenceDataUrl/)
+  assert.match(camera, /fallBoxes/)
+  assert.match(camera, /x-tomo-evidence-kind": "clip"/)
+  assert.match(alertsRoute, /evidenceDataUrl/)
+  assert.match(alertsRoute, /videoKey/)
+  assert.match(schema, /evidenceDataUrl: text\("evidence_data_url"\)/)
+  assert.match(schema, /videoKey: text\("video_key"\)/)
+  assert.match(caregiver, /storedAlert\.evidenceDataUrl/)
+  assert.match(caregiver, /storedAlert\.videoKey/)
+})
+
 test("uses the newest object observation and records repeat-aware retrieval receipts", async () => {
   const chat = await source("app/api/chat/route.ts")
   assert.match(chat, /Date\.parse\(right\.memory\.occurredAt\)/)

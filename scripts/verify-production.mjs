@@ -184,10 +184,32 @@ await check("fall alert deduplication and resolution", async () => {
     severity: "urgent",
     title: "Possible fall — please check",
     message: "Production verification alert",
+    evidenceDataUrl: tinyJpeg,
+    boxes: [{ label: "Person", confidence: 0.88, x: 0.2, y: 0.15, width: 0.5, height: 0.7 }],
   })
   const created = await request("/api/alerts", { method: "POST", body })
   assert.ok(created.response.status === 201 || created.response.status === 200)
   const alertId = created.payload.alert.id
+  assert.equal(created.payload.alert.evidenceDataUrl, tinyJpeg)
+  assert.equal(created.payload.alert.boxes[0].label, "Person")
+
+  const clip = await request("/api/evidence", {
+    method: "POST",
+    headers: { "content-type": "video/webm", "x-tomo-evidence-kind": "clip" },
+    body: new Uint8Array([26, 69, 223, 163]),
+  })
+  assert.equal(clip.response.status, 201)
+  assert.equal(clip.payload.kind, "clip")
+
+  const attached = await request(`/api/alerts/${alertId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ videoKey: clip.payload.key, actor: "production-verifier" }),
+  })
+  assert.equal(attached.response.status, 200)
+  assert.equal(attached.payload.alert.videoKey, clip.payload.key)
+
+  const retrievedClip = await request(`/api/evidence?key=${encodeURIComponent(clip.payload.key)}`)
+  assert.equal(retrievedClip.response.status, 200)
 
   const duplicate = await request("/api/alerts", { method: "POST", body })
   assert.equal(duplicate.response.status, 200)

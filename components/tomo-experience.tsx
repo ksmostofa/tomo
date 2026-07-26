@@ -99,6 +99,9 @@ type StoredAlert = {
   title: string
   message: string
   evidenceKey: string | null
+  evidenceDataUrl: string | null
+  videoKey: string | null
+  boxes: ChatEvidence["boxes"]
   createdAt: string
 }
 
@@ -741,6 +744,42 @@ function ApprovalCard({ approval, onResolved }: { approval: StoredApproval | nul
   )
 }
 
+function AlertEvidence({ storedAlert }: { storedAlert: StoredAlert }) {
+  const [clipUrl, setClipUrl] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (!storedAlert.videoKey) return
+    let active = true
+    let objectUrl: string | null = null
+    void fetch(`/api/evidence?key=${encodeURIComponent(storedAlert.videoKey)}`, {
+      headers: { "x-tomo-household": householdId() },
+    }).then(async (response) => {
+      if (!response.ok) return
+      objectUrl = URL.createObjectURL(await response.blob())
+      if (active) setClipUrl(objectUrl)
+    }).catch(() => undefined)
+    return () => {
+      active = false
+      if (objectUrl) URL.revokeObjectURL(objectUrl)
+    }
+  }, [storedAlert.videoKey])
+
+  const hasEvidence = Boolean(storedAlert.evidenceDataUrl || storedAlert.videoKey)
+  return (
+    <Card>
+      <CardHeader><CardTitle>Safety evidence</CardTitle><CardDescription>{hasEvidence ? "Captured only for this possible-fall review." : "No supporting frame was captured for this event."}</CardDescription></CardHeader>
+      <CardContent className="space-y-4">
+        {storedAlert.evidenceDataUrl ? <div className="relative overflow-hidden rounded-3xl bg-muted">
+          {/* Alert evidence is an inline, bounded data URL returned by TOMO's own API. */}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img src={storedAlert.evidenceDataUrl} alt="Marked camera frame supporting this possible-fall alert" className="aspect-video size-full object-contain" />
+          {storedAlert.boxes.map((box, index) => <div key={`${box.label}-${index}`} className="pointer-events-none absolute border-2 border-destructive" style={{ left: `${box.x * 100}%`, top: `${box.y * 100}%`, width: `${box.width * 100}%`, height: `${box.height * 100}%` }}><Badge variant="destructive" className="absolute -top-6 left-0">{box.label} · {Math.round(box.confidence * 100)}%</Badge></div>)}
+        </div> : <div className="flex min-h-64 items-center justify-center rounded-3xl bg-muted text-center"><div><Camera className="mx-auto size-7 text-muted-foreground" /><p className="mt-3 font-medium">No supporting frame</p><p className="mt-1 text-sm text-muted-foreground">The detector event was saved without a usable image.</p></div></div>}
+        {clipUrl ? <video controls playsInline preload="metadata" src={clipUrl} className="aspect-video w-full rounded-3xl bg-black" aria-label="Short possible-fall evidence clip" /> : storedAlert.videoKey ? <p className="text-sm text-muted-foreground">Loading the protected event clip…</p> : null}
+      </CardContent>
+    </Card>
+  )
+}
+
 function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role; onRoleChange: (role: Role) => void; view: CaregiverView; onViewChange: (view: CaregiverView) => void }) {
   const [alerts, setAlerts] = React.useState<StoredAlert[]>([])
   const [storedAlert, setStoredAlert] = React.useState<StoredAlert | null>(null)
@@ -791,7 +830,7 @@ function CaregiverInbox({ role, onRoleChange, view, onViewChange }: { role: Role
           {storedAlert ? <>
             <div className="flex flex-wrap items-center justify-between gap-3"><div><p className="text-sm text-muted-foreground">Household incident</p><h2 className="text-2xl font-semibold tracking-tight">{storedAlert.title}</h2></div><Badge variant={resolved ? "secondary" : "destructive"}>{resolved ? "Resolved" : "Action recommended"}</Badge></div>
             <div className="grid gap-5 2xl:grid-cols-[1.15fr_.85fr]">
-              <Card><CardHeader><CardTitle>Safety evidence</CardTitle><CardDescription>{storedAlert.evidenceKey ? "Evidence reference attached to this alert." : "No photo was retained for this event."}</CardDescription></CardHeader><CardContent><div className="flex min-h-64 items-center justify-center rounded-3xl bg-muted text-center"><div><Camera className="mx-auto size-7 text-muted-foreground" /><p className="mt-3 font-medium">{storedAlert.evidenceKey ? "Evidence stored securely" : "No supporting frame"}</p><p className="mt-1 text-sm text-muted-foreground">{storedAlert.evidenceKey ? "Secure object retrieval will be available when evidence storage is enabled." : "Only the detector event was saved."}</p></div></div></CardContent></Card>
+              <AlertEvidence storedAlert={storedAlert} />
               <div className="space-y-5"><Card className={cn(!resolved && "border-destructive/30")}><CardHeader><div className="flex items-start justify-between gap-3"><span className={cn("flex size-11 items-center justify-center rounded-2xl", resolved ? "bg-secondary" : "bg-destructive/10 text-destructive")}>{resolved ? <CircleCheck /> : <AlertTriangle />}</span><Badge variant={resolved ? "secondary" : "destructive"}>{resolved ? "Safe" : "Urgent"}</Badge></div><CardTitle className="text-2xl">{resolved ? "Marked safe" : alertState === "checking" ? "Caregiver is checking now" : storedAlert.title}</CardTitle><CardDescription>{storedAlert.message}</CardDescription></CardHeader><CardContent className="flex flex-wrap gap-2"><Button className="min-h-12 flex-1" disabled={resolved} onClick={() => void updateAlert("checking")}><UserRound /> I’m checking</Button><Button className="min-h-12 flex-1" variant="secondary" disabled={resolved} onClick={() => void updateAlert("resolved")}><CircleCheck /> Resolve</Button></CardContent></Card><Card><CardHeader><CardTitle>Event record</CardTitle></CardHeader><CardContent><Marker><MarkerIcon><Activity /></MarkerIcon><MarkerContent><span className="block font-medium text-foreground">Alert created by local detector</span><span className="text-xs">{new Date(storedAlert.createdAt).toLocaleString()}</span></MarkerContent></Marker></CardContent></Card></div>
             </div>
           </> : <Card><CardHeader><CardTitle>No possible-fall alerts</CardTitle><CardDescription>The caregiver dashboard is showing live household data. A confirmed local fall event will appear here immediately.</CardDescription></CardHeader><CardContent><div className="flex min-h-56 items-center justify-center rounded-3xl bg-muted text-center"><div><CircleCheck className="mx-auto size-8" /><p className="mt-3 font-medium">Nothing needs attention</p><p className="mt-1 text-sm text-muted-foreground">Only stored household events appear in this view.</p></div></div></CardContent></Card>}
