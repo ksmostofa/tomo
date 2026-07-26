@@ -1,61 +1,28 @@
 flowchart LR
-  subgraph DEVICE["Patient device - local and continuous"]
-    INPUT["Camera + microphone"]
-    BUFFER["Short in-memory ring buffer"]
-    GATE["Motion gate"]
-    VISION["YOLO26n + fall analysis"]
-    TRACK["Object and person tracking"]
-    SELECT["Important-event selector"]
-    OVERLAY["Live labels + voice UI"]
-    DELETE["Discard no-motion video"]
-
-    INPUT --> BUFFER
-    INPUT --> GATE
-    GATE -->|Movement| VISION
-    GATE -->|No movement| DELETE
-    VISION --> TRACK
-    VISION --> OVERLAY
-    TRACK --> SELECT
+  subgraph Patient["Authenticated patient device"]
+    CAM["Front camera"] --> YOLO["Local object YOLO"]
+    CAM --> BUFFER["Rolling 5-second local buffer"]
+    YOLO --> PERSONAL["Motion-gated glasses/keys"]
+    YOLO --> FALL["Visible-person temporal fall confirmation"]
   end
-
-  EVENT["Five-second event package<br/>description, labels, timestamp,<br/>best frame, boxes, confidence"]
-  SELECT -->|Important or safety event| EVENT
-
-  subgraph EDGE["Cloudflare application"]
-    API["Next.js / vinext Worker API"]
-    D1[("D1 structured memory")]
-    R2[("R2 private evidence")]
-    SEARCH["Hybrid semantic retrieval"]
-    OUTBOX["Alerts + approval outbox"]
-    CONTEXT["Validated live context cache"]
-
-    API --> D1
-    API --> R2
-    D1 --> SEARCH
-    R2 --> SEARCH
-    API --> OUTBOX
-    API --> CONTEXT
-    SEARCH --> API
+  subgraph Convex["Convex + Better Auth"]
+    ACL["Household role authorization"]
+    MEMORY[("Realtime vector memory")]
+    CARE["Alerts + approvals + schedules"]
+    GRANTS["Expiring one-use media grants"]
+    ACL --> MEMORY
+    ACL --> CARE
+    ACL --> GRANTS
   end
-
-  EVENT -->|Consent + minimum evidence| API
-
-  subgraph PROVIDERS["Typed provider adapters"]
-    QWEN["Qwen Cloud<br/>chat, vision, embeddings, ASR/TTS"]
-    AIAND["ai&amp;<br/>private Japanese reasoning"]
-    NOSANA["Nosana<br/>specialized GPU inference"]
-    GMI["GMI Cloud<br/>high-severity second opinion"]
-    DAYTONA["Daytona<br/>isolated live-data retrieval"]
+  subgraph Cloudflare["Cloudflare"]
+    APP["Pages + Workers"]
+    AI["Workers AI Qwen"]
+    R2[("Private R2")]
+    APP --> AI
+    APP --> R2
   end
-
-  API <--> QWEN
-  API -.->|Optional| AIAND
-  API -.->|Optional| NOSANA
-  API -.->|Optional| GMI
-  CONTEXT -.->|Optional sandbox| DAYTONA
-
-  PATIENT["Patient chat + voice"]
-  CAREGIVER["Caregiver inbox + chat"]
-  PATIENT <--> API
-  CAREGIVER <--> API
-  OUTBOX --> CAREGIVER
+  FALL -->|"confirmed only"| GRANTS
+  BUFFER -->|"explicit/significant only"| GRANTS
+  GRANTS <--> APP
+  MEMORY <--> APP
+  CARE --> CAREGIVER["Authenticated caregiver device"]

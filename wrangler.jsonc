@@ -2,20 +2,13 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "tomo",
   "pages_build_output_dir": "./dist/client",
-  "compatibility_date": "2026-07-25",
+  "compatibility_date": "2026-05-22",
   "compatibility_flags": ["nodejs_compat"],
   "ai": { "binding": "AI" },
   "r2_buckets": [
     {
       "binding": "EVIDENCE",
       "bucket_name": "tomo-memoria-evidence"
-    }
-  ],
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "tomo-memoria-db",
-      "database_id": "7a70b4de-2534-43e4-a573-92982fcbe44b"
     }
   ]
 }
