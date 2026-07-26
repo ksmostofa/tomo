@@ -1,6 +1,6 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDbOptional } from "@/db";
-import { alerts, households } from "@/db/schema";
+import { alerts, households, memories } from "@/db/schema";
 import { householdFrom, readJson, requireText, RouteError, routeError } from "@/lib/server/http";
 import { notifyCaregiver } from "@/lib/server/providers/email";
 
@@ -72,6 +72,22 @@ export async function POST(request: Request) {
       videoKey: payload.videoKey?.trim() || null,
       boxes,
     }).returning();
+    if (payload.type === "possible_fall") {
+      await db.insert(memories).values({
+        id: `alert:${alert.id}`,
+        householdId,
+        description: `${title}. ${message}`,
+        objectLabels: ["possible fall", "person", "safety event"],
+        occurredAt: new Date().toISOString(),
+        bestFrameKey: payload.evidenceKey?.trim() || null,
+        evidenceDataUrl,
+        videoKey: payload.videoKey?.trim() || null,
+        boxes,
+        importance: "safety",
+        approvalState: "trusted",
+        provenance: "camera",
+      }).onConflictDoNothing();
+    }
     const notification = await notifyCaregiver(`[TOMO] ${title}`, message).catch((error) => {
       console.error("Caregiver email failed", error);
       return { delivered: false, provider: "failed" as const, id: null };

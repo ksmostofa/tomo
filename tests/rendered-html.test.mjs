@@ -88,6 +88,7 @@ test("captures, stores, links, and renders real fall evidence", async () => {
   assert.match(camera, /x-tomo-evidence-kind": "clip"/)
   assert.match(alertsRoute, /evidenceDataUrl/)
   assert.match(alertsRoute, /videoKey/)
+  assert.match(alertsRoute, /db\.insert\(memories\)/)
   assert.match(schema, /evidenceDataUrl: text\("evidence_data_url"\)/)
   assert.match(schema, /videoKey: text\("video_key"\)/)
   assert.match(caregiver, /storedAlert\.evidenceDataUrl/)

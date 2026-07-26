@@ -211,6 +211,13 @@ await check("fall alert deduplication and resolution", async () => {
   const retrievedClip = await request(`/api/evidence?key=${encodeURIComponent(clip.payload.key)}`)
   assert.equal(retrievedClip.response.status, 200)
 
+  const incidentMemory = await request("/api/memories?q=possible%20fall")
+  assert.equal(incidentMemory.response.status, 200)
+  const storedIncident = incidentMemory.payload.memories.find((memory) => memory.id === `alert:${alertId}`)
+  assert.ok(storedIncident)
+  assert.equal(storedIncident.evidenceDataUrl, tinyJpeg)
+  assert.equal(storedIncident.videoKey, clip.payload.key)
+
   const duplicate = await request("/api/alerts", { method: "POST", body })
   assert.equal(duplicate.response.status, 200)
   assert.equal(duplicate.payload.deduplicated, true)

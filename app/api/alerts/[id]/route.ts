@@ -1,6 +1,6 @@
 import { and, eq } from "drizzle-orm";
 import { getDbOptional } from "@/db";
-import { alerts, auditEvents } from "@/db/schema";
+import { alerts, auditEvents, memories } from "@/db/schema";
 import { householdFrom, readJson, RouteError, routeError } from "@/lib/server/http";
 
 export async function PATCH(request: Request, context: { params: Promise<{ id: string }> }) {
@@ -18,6 +18,10 @@ export async function PATCH(request: Request, context: { params: Promise<{ id: s
       ...(payload.status ? { status: payload.status, resolvedAt } : {}),
       ...(payload.videoKey ? { videoKey: payload.videoKey.trim() } : {}),
     }).where(and(eq(alerts.id, id), eq(alerts.householdId, householdId))).returning();
+    if (payload.videoKey) {
+      await db.update(memories).set({ videoKey: payload.videoKey.trim(), updatedAt: new Date().toISOString() })
+        .where(and(eq(memories.id, `alert:${id}`), eq(memories.householdId, householdId)));
+    }
     await db.insert(auditEvents).values({
       householdId,
       actor: payload.actor?.trim() || "caregiver",
