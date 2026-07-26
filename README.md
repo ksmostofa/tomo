@@ -37,7 +37,7 @@ TOMO is assistive software, not a medical device. It reports a **possible fall**
 - Starts the local camera after browser consent and keeps monitoring while minimized.
 - Shows current object labels and bounding boxes only while the camera sees them.
 - Answers questions such as “Where are my glasses?” from the newest trusted observation, with a retained frame, label, time, and spoken response when available.
-- Recognizes glasses and keys with a motion-gated open-vocabulary detector in addition to YOLO’s COCO classes.
+- Recognizes household objects through one camera-awareness pipeline; personal items are detected only after movement to control heat, latency, and battery use.
 - If the same observation is requested again, acknowledges the earlier answer and asks whether the object is still missing; a newer observation always replaces the old answer.
 - Keeps `Call Yuki` prominent as a familiar human fallback.
 - Sends medicine, schedule, and other sensitive memories to caregiver approval before trusting them.
@@ -57,7 +57,7 @@ flowchart LR
   subgraph DEVICE["Patient device - local and continuous"]
     INPUT["Camera + microphone"]
     GATE["Motion gate"]
-    VISION["YOLO26n + OWL-ViT + fall analysis"]
+    VISION["Local object awareness + fall analysis"]
     CONFIRM["Temporal confirmation"]
     SELECT["Selected-frame capture"]
     OVERLAY["Live labels + voice UI"]
@@ -200,8 +200,8 @@ Routine frames are not retained. Current retained JPEGs are capped before enteri
 | Web application | Next.js 16, React 19, TypeScript | One responsive patient/caregiver application |
 | Cloudflare runtime | vinext, Cloudflare Workers | Low-cost edge rendering and API execution |
 | UI | shadcn/ui preset `b1VlIugq`, Base UI, Lucide | Strict, accessible component vocabulary |
-| Local vision | YOLO26n ONNX, OWL-ViT via Transformers.js, ONNX Runtime Web | Fast COCO boxes plus motion-gated glasses/keys recognition with WebGPU/WASM fallback |
-| Fall analysis | Specialized fall model + temporal tracker | Conservative possible-fall events |
+| Local vision | Compact ONNX detector, motion-gated open-vocabulary fallback, ONNX Runtime Web | Fast local boxes with WebGPU/WASM fallback |
+| Fall analysis | Specialized posture model + person geometry + temporal consensus | Requires a visible person, recent motion, rapid posture change or strong model evidence, and sustained low posture |
 | Structured storage | Cloudflare D1, Drizzle ORM | Memories, alerts, approvals, schedule, audit |
 | Evidence storage | Bounded D1 data URLs; Cloudflare R2 adapter | Current selected frames; private clips when the optional R2 binding is enabled |
 | Semantic memory | Qwen embeddings + D1 hybrid ranking | English/Japanese evidence retrieval |
@@ -257,7 +257,7 @@ This repository is under active construction. The README describes the approved 
 | Live YOLO26n labels and bounding boxes | Working locally |
 | Motion-gated glasses/keys recognition | Working locally with OWL-ViT and 2-of-3 confirmation |
 | English/Japanese browser speech input/output | Working on compatible browsers |
-| Temporal Project Memoria fall model and D1 alert trigger | Working locally; recent movement + 4-of-5 high-confidence votes + 10-minute deduplication |
+| Temporal Project Memoria fall model and D1 alert trigger | Working locally; visible-person gate, stronger-upright suppression, temporal consensus, geometry fallback, and 10-minute deduplication |
 | Motion-gated selected-frame capture | **Live** for confirmed glasses/keys observations |
 | Full five-second event clip retention | Not enabled; requires R2 |
 | D1 structured + hybrid semantic memory | **Live** |

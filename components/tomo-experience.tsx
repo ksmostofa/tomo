@@ -387,16 +387,12 @@ function LiveCameraPanel() {
 }
 
 function LocalAnalysisCard() {
-  const { realFallActive, personalDetectorState, detections, state } = useLiveCamera()
+  const { detections, state } = useLiveCamera()
   return (
     <Card>
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle>Live local analysis</CardTitle><CardDescription>{state === "live" ? `${detections.length} objects in the latest frame` : "Detector is starting"}</CardDescription></div><Badge variant="secondary"><ShieldCheck /> Local only</Badge></CardHeader>
       <CardContent className="space-y-1">
-        <StatusRow icon={<Search />} label="Object detection" status={state === "live" ? "Active" : state === "blocked" ? "Blocked" : state === "error" ? "Paused" : "Starting"} detail={state === "live" ? `${detections.length} object${detections.length === 1 ? "" : "s"} in view` : state === "blocked" ? "Waiting for camera permission" : "Getting the camera ready"} />
-        <Separator />
-        <StatusRow icon={<Glasses />} label="Glasses and keys" status={personalDetectorState === "ready" ? "Ready" : personalDetectorState === "error" ? "Unavailable" : personalDetectorState === "loading" ? "Getting ready" : "Watching"} detail={personalDetectorState === "ready" ? "Confirmed locations can be remembered" : personalDetectorState === "loading" ? "Preparing personal-item recognition" : personalDetectorState === "error" ? "Personal-item recognition is unavailable" : "Checks when meaningful movement is seen"} />
-        <Separator />
-        <StatusRow icon={<Activity />} label="Fall safety" status={state === "live" ? realFallActive ? "Please check" : "Active" : "Waiting"} detail={realFallActive ? "A possible fall needs attention" : state === "live" ? "Watching for a possible fall" : "Starts after the camera is ready"} />
+        <StatusRow icon={<Search />} label="Camera awareness" status={state === "live" ? "Active" : state === "blocked" ? "Blocked" : state === "error" ? "Paused" : "Starting"} detail={state === "live" ? `${detections.length} current detection${detections.length === 1 ? "" : "s"}; important changes are remembered` : state === "blocked" ? "Waiting for camera permission" : "Getting the camera ready"} />
         <Separator />
         <StatusRow icon={<Clock3 />} label="Frame privacy" status={state === "live" ? "Active" : "Waiting"} detail="Frames without a confirmed event are not saved" />
       </CardContent>

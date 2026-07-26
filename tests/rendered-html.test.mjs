@@ -60,6 +60,21 @@ test("starts the front camera and detector together without exposing implementat
   assert.doesNotMatch(ui, visibleImplementationDetails)
 })
 
+test("gates fall confirmation on a visible person and stronger fallen evidence", async () => {
+  const [camera, ui] = await Promise.all([
+    source("components/live-camera-provider.tsx"),
+    source("components/tomo-experience.tsx"),
+  ])
+
+  assert.match(camera, /uprightScore/)
+  assert.match(camera, /fallenScore > uprightScore \+ 0\.08/)
+  assert.match(camera, /visiblePerson/)
+  assert.match(camera, /rapidPostureChange/)
+  assert.match(camera, /geometryFallVotes/)
+  assert.doesNotMatch(ui, /label="Glasses and keys"/)
+  assert.doesNotMatch(ui, /label="Fall safety"/)
+})
+
 test("uses the newest object observation and records repeat-aware retrieval receipts", async () => {
   const chat = await source("app/api/chat/route.ts")
   assert.match(chat, /Date\.parse\(right\.memory\.occurredAt\)/)

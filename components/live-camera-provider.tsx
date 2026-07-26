@@ -264,6 +264,9 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     let lastMeaningfulMotionAt = 0
     let lastAlertAt = 0
     let fallVotes: Array<{ fallen: boolean; confidence: number }> = []
+    let geometryFallVotes: boolean[] = []
+    let previousPerson: { aspect: number; centerY: number; at: number } | null = null
+    let rapidPostureChangeUntil = 0
     let alertSent = false
     let personalInferenceRunning = false
     let lastPersonalInferenceAt = 0
@@ -287,6 +290,26 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
           previousLuma = motion.currentLuma
           const now = performance.now()
           if (motion.meaningfulMotion) lastMeaningfulMotionAt = now
+
+          const visiblePerson = liveDetections
+            .filter((detection) => detection.label === "person" && detection.score >= 0.5)
+            .sort((left, right) => right.box.width * right.box.height - left.box.width * left.box.height)[0]
+          let lowPosture = false
+          let rapidPostureChange = false
+          if (visiblePerson) {
+            const aspect = visiblePerson.box.width / Math.max(visiblePerson.box.height, 1)
+            const centerY = (visiblePerson.box.y + visiblePerson.box.height / 2) / video.videoHeight
+            const bottom = (visiblePerson.box.y + visiblePerson.box.height) / video.videoHeight
+            rapidPostureChange = Boolean(previousPerson
+              && now - previousPerson.at <= 2_000
+              && ((previousPerson.aspect < 0.8 && aspect >= 1)
+                || centerY - previousPerson.centerY >= 0.12))
+            if (rapidPostureChange) rapidPostureChangeUntil = now + 6_000
+            lowPosture = aspect >= 1 && bottom >= 0.7
+            previousPerson = { aspect, centerY, at: now }
+          } else if (previousPerson && now - previousPerson.at > 2_000) {
+            previousPerson = null
+          }
 
           if (motion.box) personalBurstRemaining = Math.max(personalBurstRemaining, 2)
           if ((motion.box || personalBurstRemaining > 0) && !personalInferenceRunning && now - lastPersonalInferenceAt >= PERSONAL_INFERENCE_INTERVAL_MS) {
@@ -382,17 +405,24 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
             const fallResults = await fallSession.run({ images: frame.tensor })
             const fallOutput = fallResults[fallSession.outputNames[0]]
             const postureDetections = parseYoloOutput(fallOutput.data as Float32Array, frame, ["fallen", "not fallen"])
-            const fallen = postureDetections.filter((detection) => detection.label === "fallen").sort((left, right) => right.score - left.score)[0]
-            fallVotes = [...fallVotes, { fallen: Boolean(fallen), confidence: fallen?.score ?? 0 }].slice(-5)
+            const fallenScore = Math.max(0, ...postureDetections.filter((detection) => detection.label === "fallen").map((detection) => detection.score))
+            const uprightScore = Math.max(0, ...postureDetections.filter((detection) => detection.label === "not fallen").map((detection) => detection.score))
+            const modelFallen = Boolean(visiblePerson && fallenScore >= 0.72 && fallenScore > uprightScore + 0.08)
+            fallVotes = [...fallVotes, { fallen: modelFallen, confidence: fallenScore }].slice(-5)
+            geometryFallVotes = [...geometryFallVotes, Boolean(visiblePerson && lowPosture && now <= rapidPostureChangeUntil)].slice(-5)
             const positiveVotes = fallVotes.filter((vote) => vote.fallen)
-            const confirmed = fallVotes.length >= 5
+            const modelConfirmed = fallVotes.length >= 5
               && positiveVotes.length >= 4
-              && positiveVotes.every((vote) => vote.confidence >= 0.7)
+              && positiveVotes.every((vote) => vote.confidence >= 0.72)
+            const geometryConfirmed = geometryFallVotes.length >= 5
+              && geometryFallVotes.filter(Boolean).length >= 4
+            const confirmed = Boolean(visiblePerson
               && performance.now() - lastMeaningfulMotionAt <= 8_000
+              && (modelConfirmed || geometryConfirmed))
             const confidence = positiveVotes.length
               ? positiveVotes.reduce((total, vote) => total + vote.confidence, 0) / positiveVotes.length
               : 0
-            setFallConfidence(confidence)
+            setFallConfidence(confirmed ? confidence : 0)
             setRealFallActive(confirmed)
 
             if (confirmed && !alertSent && Date.now() - lastAlertAt >= 10 * 60_000) {
