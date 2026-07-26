@@ -41,6 +41,25 @@ test("keeps perception local and includes both detector artifacts", async () => 
   assert.ok(fallModel.size > 1_000_000)
 })
 
+test("starts the front camera and detector together without exposing implementation details", async () => {
+  const [camera, ui] = await Promise.all([
+    source("components/live-camera-provider.tsx"),
+    source("components/tomo-experience.tsx"),
+  ])
+
+  assert.match(camera, /facingMode:\s*\{\s*ideal:\s*"user"\s*\}/)
+
+  const detectorStart = camera.indexOf("const detectorPromise")
+  const cameraStart = camera.indexOf("await navigator.mediaDevices.getUserMedia")
+  const detectorReady = camera.indexOf("await detectorPromise")
+  assert.ok(detectorStart >= 0 && detectorStart < cameraStart, "detector loading must begin before camera negotiation")
+  assert.ok(detectorReady > cameraStart, "camera and detector startup must overlap")
+
+  const visibleImplementationDetails = /Starting private YOLO analysis|YOLO26n ·|YOLO26n object recognition|WebGPU ·|WebAssembly ·|Memoria temporal fall model|Provider:|Searchable in D1/
+  assert.doesNotMatch(camera, visibleImplementationDetails)
+  assert.doesNotMatch(ui, visibleImplementationDetails)
+})
+
 test("uses the newest object observation and records repeat-aware retrieval receipts", async () => {
   const chat = await source("app/api/chat/route.ts")
   assert.match(chat, /Date\.parse\(right\.memory\.occurredAt\)/)

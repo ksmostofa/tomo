@@ -35,7 +35,7 @@ TOMO is assistive software, not a medical device. It reports a **possible fall**
 
 - Opens directly into a calm, centered voice experience.
 - Starts the local camera after browser consent and keeps monitoring while minimized.
-- Shows real YOLO labels and bounding boxes only for current detections.
+- Shows current object labels and bounding boxes only while the camera sees them.
 - Answers questions such as “Where are my glasses?” from the newest trusted observation, with a retained frame, label, time, and spoken response when available.
 - Recognizes glasses and keys with a motion-gated open-vocabulary detector in addition to YOLO’s COCO classes.
 - If the same observation is requested again, acknowledges the earlier answer and asks whether the object is still missing; a newer observation always replaces the old answer.
@@ -46,7 +46,7 @@ TOMO is assistive software, not a medical device. It reports a **possible fall**
 
 - Opens into a care inbox containing only real stored alerts and approval requests—no seeded incident.
 - Can acknowledge or resolve a real incident.
-- Approves, edits, or rejects patient-submitted sensitive memories.
+- Approves or rejects patient-submitted sensitive memories.
 - Uses the same chat interface to retrieve evidence or add trusted semantic memory.
 - Can configure the caregiver phone number locally from the patient’s `Call Yuki` dialog.
 
@@ -56,24 +56,22 @@ TOMO is assistive software, not a medical device. It reports a **possible fall**
 flowchart LR
   subgraph DEVICE["Patient device - local and continuous"]
     INPUT["Camera + microphone"]
-    BUFFER["Short in-memory ring buffer"]
     GATE["Motion gate"]
     VISION["YOLO26n + OWL-ViT + fall analysis"]
-    TRACK["Object and person tracking"]
-    SELECT["Important-event selector"]
+    CONFIRM["Temporal confirmation"]
+    SELECT["Selected-frame capture"]
     OVERLAY["Live labels + voice UI"]
-    DELETE["Discard no-motion video"]
+    DELETE["Do not retain routine frames"]
 
-    INPUT --> BUFFER
     INPUT --> GATE
-    GATE -->|Movement| VISION
+    INPUT --> VISION
+    GATE -->|Meaningful movement| VISION
     GATE -->|No movement| DELETE
-    VISION --> TRACK
     VISION --> OVERLAY
-    TRACK --> SELECT
+    VISION --> CONFIRM --> SELECT
   end
 
-  EVENT["Five-second event package<br/>description, labels, timestamp,<br/>best frame, boxes, confidence"]
+  EVENT["Confirmed observation<br/>description, labels, timestamp,<br/>selected JPEG, boxes, confidence"]
   SELECT -->|Important or safety event| EVENT
 
   subgraph EDGE["Cloudflare application"]
@@ -82,8 +80,8 @@ flowchart LR
     INLINE[("D1 bounded inline frames")]
     R2[("R2 private evidence - optional")]
     SEARCH["Hybrid semantic retrieval"]
-    OUTBOX["Alerts + approval outbox"]
-    CONTEXT["Validated live context cache"]
+    ALERTS["Alerts + approvals"]
+    CONTEXT["Live weather context"]
 
     API --> D1
     API --> INLINE
@@ -91,14 +89,14 @@ flowchart LR
     D1 --> SEARCH
     INLINE --> SEARCH
     R2 -.-> SEARCH
-    API --> OUTBOX
+    API --> ALERTS
     API --> CONTEXT
     SEARCH --> API
   end
 
   EVENT -->|Consent + minimum evidence| API
 
-  subgraph PROVIDERS["Typed provider adapters"]
+  subgraph PROVIDERS["Active and optional providers"]
     QWEN["Qwen provider adapter<br/>Cloudflare-hosted Qwen or Qwen Cloud"]
     AIAND["ai&amp;<br/>private Japanese reasoning"]
     NOSANA["Nosana<br/>specialized GPU inference"]
@@ -116,7 +114,7 @@ flowchart LR
   CAREGIVER["Caregiver inbox + chat"]
   PATIENT <--> API
   CAREGIVER <--> API
-  OUTBOX --> CAREGIVER
+  ALERTS --> CAREGIVER
 ```
 
 ### Runtime communication
@@ -137,33 +135,33 @@ sequenceDiagram
   alt No meaningful movement
     Local-->>Local: Delete temporary frames
   else Important object event
-    Local->>API: Five-second event + selected evidence
+    Local->>API: Confirmed observation + selected evidence
     API->>AI: Describe and embed approved evidence
     AI-->>API: Structured description + embedding
     API->>Memory: Store facts, frame key, boxes, provenance
   else Possible fall
     Local->>API: Immediate possible-fall event
-    API->>Memory: Persist incident and evidence
+    API->>Memory: Persist incident record
     API-->>Caregiver: Alert with review actions
   end
   Patient->>API: Voice or typed question
   API->>Memory: Hybrid semantic search
   Memory-->>API: Ranked memories + supporting frame
-  API->>AI: Grounded bilingual response
-  AI-->>API: Answer + speech
-  API-->>Patient: Text, voice, frame, and object box
-  Caregiver->>API: Approve, edit, reject, or resolve
+  API->>AI: Grounded bilingual text response
+  AI-->>API: Answer
+  API-->>Patient: Text, browser speech, frame, and object box
+  Caregiver->>API: Approve, reject, acknowledge, or resolve
   API->>Memory: Update trusted state and audit trail
 ```
 
 ### Communication model
 
-1. **Fast local lane:** the camera, motion gate, YOLO, tracker, rolling buffer, and bounding-box rendering run in the browser. This path never waits for cloud AI.
+1. **Fast local lane:** the camera, motion gate, object detector, temporal checks, and bounding-box rendering run in the browser. This path never waits for cloud AI.
 2. **Safety lane:** a fall-like posture must persist across time before TOMO creates a possible-fall event. The immediate caregiver alert is separate from slower video enrichment.
-3. **Memory lane:** only confirmed glasses/keys observations and safety events leave the transient browser buffer. A bounded JPEG, coordinates, structured facts, and provenance are stored in D1. R2 is an optional production upgrade.
+3. **Memory lane:** only confirmed glasses/keys observations leave the live frame stream. A bounded JPEG, coordinates, structured facts, and provenance are stored in D1. Fall alerts currently store the event record without a retained image. R2 clips are a future upgrade.
 4. **Retrieval lane:** explicit glasses/keys questions select the newest trusted observation first. TOMO records a retrieval receipt; asking again against the same observation produces a gentle follow-up, while a newer observation replaces it. Other questions use hybrid lexical/vector retrieval and Qwen grounding.
 5. **Approval lane:** caregiver memories are trusted immediately. Sensitive patient statements remain pending until a caregiver approves or edits them.
-6. **Voice lane:** an English/Japanese `VoiceRealtime` adapter streams ASR and TTS. Typed chat remains the fallback when realtime voice is unavailable.
+6. **Voice lane:** compatible browsers provide English/Japanese speech recognition and synthesis; typed chat is always available. Provider-grade realtime voice is not implemented yet.
 
 ## Memory capture contract
 
@@ -193,7 +191,7 @@ type MemoryEvent = {
 }
 ```
 
-Routine, no-motion footage expires locally. Current retained JPEGs are capped before entering D1. When R2 is enabled, clips must use short retention, private object keys, household isolation, and an audit trail.
+Routine frames are not retained. Current retained JPEGs are capped before entering D1. When R2 is enabled, clips must use short retention, private object keys, authenticated household authorization, and an audit trail.
 
 ## Technology stack
 
@@ -223,7 +221,7 @@ Routine, no-motion footage expires locally. Current retained JPEGs are capped be
 
 The deployed application currently runs Qwen chat and embeddings through the **Cloudflare Workers AI binding** (`@cf/qwen/qwen3-30b-a3b-fp8` and `@cf/qwen/qwen3-embedding-0.6b`). This is a real Qwen integration, but it is not presented as the Qwen Cloud sponsor API. If Qwen Cloud credentials are added, the same adapter prefers them without changing route contracts.
 
-Provider failures are explicit and recoverable. TOMO must retain typed-chat fallback, local safety behavior, and durable outbox state when a provider is unavailable.
+Typed chat and local camera analysis continue independently of optional sponsor providers. A durable notification outbox is still required before production use.
 
 ## Repository structure
 
@@ -240,6 +238,7 @@ public/
   yolo26n.onnx               Local object detector
 worker/                      Cloudflare Worker entry point
 scripts/prepare-pages.mjs    Reproducible Pages advanced-mode bundle
+scripts/verify-production.mjs Live API integration verifier
 wrangler.jsonc               Pages, D1, and Workers AI bindings
 tests/                       Build and rendered-output checks
 ```
@@ -254,6 +253,7 @@ This repository is under active construction. The README describes the approved 
 | Patient and caregiver responsive UI | **Live** |
 | Strict shadcn `b1VlIugq` design system | Working |
 | Persistent camera while minimized | Working |
+| Phone camera defaults to front-facing | Working |
 | Live YOLO26n labels and bounding boxes | Working locally |
 | Motion-gated glasses/keys recognition | Working locally with OWL-ViT and 2-of-3 confirmation |
 | English/Japanese browser speech input/output | Working on compatible browsers |
@@ -292,8 +292,15 @@ Open [http://localhost:3000](http://localhost:3000), allow camera access, and op
 
 ```bash
 pnpm lint
+pnpm typecheck
 pnpm build
 pnpm test
+```
+
+After deploying, run the live API verifier against a non-sensitive environment, then remove its generated `verify_*` household from D1:
+
+```bash
+pnpm verify:production
 ```
 
 ## shadcn constraint
@@ -341,7 +348,7 @@ Only variables used by an implemented provider should be configured. Optional sp
 - Local-first continuous vision; no continuous cloud stream.
 - Minimum necessary evidence and bounded retention.
 - Household-scoped reads and writes.
-- Signed/private evidence access.
+- Signed/private evidence access is required before R2 evidence is enabled.
 - “Possible fall” language with visible uncertainty.
 - Caregiver acknowledgement before closing incidents.
 - WCAG 2.2 AA targets, keyboard support, visible focus, captions, reduced motion and 200% zoom.

@@ -1,0 +1,7 @@
+/yolo26n.onnx
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/octet-stream
+
+/memoria-fall.onnx
+  Cache-Control: public, max-age=31536000, immutable
+  Content-Type: application/octet-stream

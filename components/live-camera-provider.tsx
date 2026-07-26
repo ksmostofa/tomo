@@ -40,8 +40,8 @@ const MODEL_SIZE = 320
 const MOTION_WIDTH = 96
 const MOTION_HEIGHT = 54
 const TARGET_INFERENCE_INTERVAL_MS = 220
-const MODEL_PATH = "/yolo26n.onnx"
-const FALL_MODEL_PATH = "/memoria-fall.onnx"
+const MODEL_PATH = "/yolo26n.onnx?v=1"
+const FALL_MODEL_PATH = "/memoria-fall.onnx?v=1"
 const ORT_WASM_PATH = "https://cdn.jsdelivr.net/npm/onnxruntime-web@1.27.0/dist/"
 const PERSONAL_INFERENCE_INTERVAL_MS = 2_500
 
@@ -63,7 +63,7 @@ function readableCameraError(error: unknown) {
     if (error.name === "NotReadableError") return "The camera is already in use by another application."
   }
   if (error instanceof Error && /onnx|wasm|webgpu|model|session/i.test(error.message)) {
-    return "The local YOLO model could not start. Check the connection once so TOMO can load its detector."
+    return "Camera analysis could not start. Check the connection once, then try again."
   }
   return "TOMO could not start the camera. Check the device camera and try again."
 }
@@ -407,7 +407,7 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
                     type: "possible_fall",
                     severity: "urgent",
                     title: "Possible fall — please check",
-                    message: `The local temporal fall model detected a sustained fall-like posture (${Math.round(confidence * 100)}% raw confidence).`,
+                    message: "TOMO detected a sustained fall-like posture and could not confirm that the person is okay.",
                   }),
                 }).catch(() => undefined)
               }
@@ -447,16 +447,25 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     setError(null)
     setState("starting")
 
+    const hasCachedDetector = Boolean(sessionRef.current && ortRef.current)
+    const detectorPromise = hasCachedDetector
+      ? Promise.resolve({
+          ort: ortRef.current as OrtModule,
+          session: sessionRef.current as InferenceSession,
+          runtime: runtimeRef.current ?? "WebAssembly" as const,
+        })
+      : createYoloSession()
+
     let cameraStream: MediaStream
 
     try {
       cameraStream = await navigator.mediaDevices.getUserMedia({
         audio: false,
         video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1280 },
-          height: { ideal: 720 },
-          frameRate: { ideal: 24, max: 30 },
+          facingMode: { ideal: "user" },
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+          frameRate: { ideal: 20, max: 24 },
         },
       })
       streamRef.current = cameraStream
@@ -474,15 +483,16 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       const message = readableCameraError(cameraError)
       setState(cameraError instanceof DOMException && cameraError.name === "NotAllowedError" ? "blocked" : "error")
       setError(message)
+      if (!hasCachedDetector) {
+        void detectorPromise.then(({ session }) => session.release()).catch(() => undefined)
+      }
       return
     }
 
     setState("loading-model")
 
     try {
-      const detector = sessionRef.current && ortRef.current
-        ? { ort: ortRef.current, session: sessionRef.current, runtime: runtimeRef.current ?? "WebAssembly" as const }
-        : await createYoloSession()
+      const detector = await detectorPromise
 
       sessionRef.current = detector.session
       ortRef.current = detector.ort
@@ -545,8 +555,8 @@ export function useLiveCamera() {
   return context
 }
 
-export function LiveCameraView({ className, compact = false }: { className?: string; compact?: boolean }) {
-  const { realFallActive, fallConfidence, detections, error, inferenceMs, retry, runtime, state, stream } = useLiveCamera()
+export function LiveCameraView({ className }: { className?: string; compact?: boolean }) {
+  const { realFallActive, detections, error, retry, state, stream } = useLiveCamera()
   const videoRef = React.useRef<HTMLVideoElement | null>(null)
   const [videoSize, setVideoSize] = React.useState({ width: 1280, height: 720 })
 
@@ -589,7 +599,7 @@ export function LiveCameraView({ className, compact = false }: { className?: str
           <span className="flex size-12 items-center justify-center rounded-2xl border bg-background">
             {isLoading ? <LoaderCircle className="size-5 animate-spin" /> : <Camera className="size-5" />}
           </span>
-          <p className="mt-3 font-medium">{isLoading ? "Starting private YOLO analysis" : "Camera is unavailable"}</p>
+          <p className="mt-3 font-medium">{isLoading ? "Starting the camera" : "Camera is unavailable"}</p>
           {error && <p className="mt-1 max-w-sm text-xs text-muted-foreground">{error}</p>}
           {!isLoading && <Button size="sm" variant="outline" className="mt-4" onClick={() => void retry()}><RefreshCw /> Try again</Button>}
         </div>
@@ -598,7 +608,7 @@ export function LiveCameraView({ className, compact = false }: { className?: str
       {hasVideo && (
         <div className="absolute inset-x-3 top-3 flex flex-wrap items-start justify-between gap-2">
           <Badge variant="secondary" className="bg-background/90 backdrop-blur"><ShieldCheck /> Local only</Badge>
-          <Badge variant="secondary" className="bg-background/90 backdrop-blur">YOLO26n · {compact ? `${detections.length} found` : `${runtime ?? "loading"} · ${inferenceMs || "—"} ms`}</Badge>
+          <Badge variant="secondary" className="bg-background/90 backdrop-blur">{state === "live" ? `${detections.length} found` : "Getting ready"}</Badge>
         </div>
       )}
 
@@ -617,7 +627,7 @@ export function LiveCameraView({ className, compact = false }: { className?: str
 
       {hasVideo && realFallActive && (
         <div className="absolute inset-x-3 bottom-3 flex justify-center" role="alert">
-          <Badge variant="destructive" className="px-3 py-1.5">Possible fall · {Math.round(fallConfidence * 100)}% · Local model</Badge>
+          <Badge variant="destructive" className="px-3 py-1.5">Possible fall · Please check</Badge>
         </div>
       )}
     </div>

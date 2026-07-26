@@ -213,6 +213,9 @@ function useChatTurn(audience: Role): ChatTurn {
     void (async () => {
       try {
         const remember = /^(remember\b|覚えて|記憶して)/i.test(message)
+        const rememberedText = message.replace(/^(?:remember(?: that)?|覚えて|記憶して)\s*/i, "")
+        const isSchedule = /\b(today|tomorrow|schedule|appointment|meeting|meet|leave by|at \d{1,2}(?::\d{2})?\s*(?:am|pm)?)\b|今日|明日|予定|約束|会う|午前|午後|\d{1,2}時/i.test(rememberedText)
+        const isMedication = /medicine|medication|薬|くすり/i.test(rememberedText)
         setStage("searching")
         const response = await fetch(remember ? "/api/memories" : "/api/chat", {
           method: "POST",
@@ -221,7 +224,7 @@ function useChatTurn(audience: Role): ChatTurn {
             "x-tomo-household": householdId(),
           },
           body: JSON.stringify(remember
-            ? { description: message.replace(/^(?:remember(?: that)?|覚えて|記憶して)\s*/i, ""), provenance: audience, importance: /medicine|medication|薬|くすり/i.test(message) ? "safety" : "important" }
+            ? { description: rememberedText, objectLabels: isSchedule ? ["schedule"] : isMedication ? ["medicine"] : [], provenance: audience, importance: isMedication ? "safety" : "important" }
             : { message, locale: /[\u3040-\u30ff\u3400-\u9fff]/.test(message) ? "ja" : "en", audience }),
           signal: controller.signal,
         })
@@ -367,7 +370,7 @@ function CameraDialogContent({ expanded = false }: { expanded?: boolean }) {
 }
 
 function LiveCameraPanel() {
-  const { detections, inferenceMs, runtime, state } = useLiveCamera()
+  const { detections, state } = useLiveCamera()
   const stateLabel = state === "live" ? "Live" : state === "blocked" ? "Permission needed" : state === "error" ? "Paused" : "Starting"
   return (
     <Card>
@@ -377,7 +380,6 @@ function LiveCameraPanel() {
         <div className="mt-3 flex flex-wrap gap-2" aria-live="polite">
           {detections.map((detection) => <Badge key={detection.id} variant="outline">{detection.label} · {Math.round(detection.score * 100)}%</Badge>)}
           {state === "live" && detections.length === 0 && <p className="text-sm text-muted-foreground">No objects above the confidence threshold in this frame.</p>}
-          {runtime && <p className="ml-auto text-xs text-muted-foreground">{runtime} · {inferenceMs || "—"} ms</p>}
         </div>
       </CardContent>
     </Card>
@@ -385,18 +387,18 @@ function LiveCameraPanel() {
 }
 
 function LocalAnalysisCard() {
-  const { realFallActive, fallConfidence, personalDetectorState, detections, inferenceMs, runtime, state } = useLiveCamera()
+  const { realFallActive, personalDetectorState, detections, state } = useLiveCamera()
   return (
     <Card>
       <CardHeader className="flex-row flex-wrap items-center justify-between gap-3"><div><CardTitle>Live local analysis</CardTitle><CardDescription>{state === "live" ? `${detections.length} objects in the latest frame` : "Detector is starting"}</CardDescription></div><Badge variant="secondary"><ShieldCheck /> Local only</Badge></CardHeader>
       <CardContent className="space-y-1">
-        <StatusRow icon={<Search />} label="YOLO26n object recognition" status={state === "live" ? "Active" : state === "blocked" ? "Blocked" : state === "error" ? "Paused" : "Loading"} detail={state === "live" ? `${runtime} · ${inferenceMs || "—"} ms · ${detections.length} detected` : state === "blocked" ? "Waiting for camera permission" : "Loading model and camera"} />
+        <StatusRow icon={<Search />} label="Object detection" status={state === "live" ? "Active" : state === "blocked" ? "Blocked" : state === "error" ? "Paused" : "Starting"} detail={state === "live" ? `${detections.length} object${detections.length === 1 ? "" : "s"} in view` : state === "blocked" ? "Waiting for camera permission" : "Getting the camera ready"} />
         <Separator />
-        <StatusRow icon={<Glasses />} label="Glasses and keys recognition" status={personalDetectorState === "ready" ? "Ready" : personalDetectorState === "error" ? "Unavailable" : personalDetectorState === "loading" ? "Loading" : "Waiting"} detail={personalDetectorState === "ready" ? "Open-vocabulary detector ready; confirmed observations become searchable" : personalDetectorState === "loading" ? "Loading the personal-object model" : personalDetectorState === "error" ? "Personal-object detector unavailable" : "Starts when meaningful movement is seen"} />
+        <StatusRow icon={<Glasses />} label="Glasses and keys" status={personalDetectorState === "ready" ? "Ready" : personalDetectorState === "error" ? "Unavailable" : personalDetectorState === "loading" ? "Getting ready" : "Watching"} detail={personalDetectorState === "ready" ? "Confirmed locations can be remembered" : personalDetectorState === "loading" ? "Preparing personal-item recognition" : personalDetectorState === "error" ? "Personal-item recognition is unavailable" : "Checks when meaningful movement is seen"} />
         <Separator />
-        <StatusRow icon={<Activity />} label="Memoria temporal fall model" status={state === "live" ? realFallActive ? "Alert" : "Active" : "Waiting"} detail={realFallActive ? `Possible fall confirmed locally · ${Math.round(fallConfidence * 100)}% raw confidence` : state === "live" ? "Requires recent movement and 4-of-5 high-confidence fall votes" : "Starts after the camera and local model are ready"} />
+        <StatusRow icon={<Activity />} label="Fall safety" status={state === "live" ? realFallActive ? "Please check" : "Active" : "Waiting"} detail={realFallActive ? "A possible fall needs attention" : state === "live" ? "Watching for a possible fall" : "Starts after the camera is ready"} />
         <Separator />
-        <StatusRow icon={<Clock3 />} label="Temporary video buffer" status={state === "live" ? "Active" : "Waiting"} detail="Recent seconds in device memory only" />
+        <StatusRow icon={<Clock3 />} label="Frame privacy" status={state === "live" ? "Active" : "Waiting"} detail="Frames without a confirmed event are not saved" />
       </CardContent>
     </Card>
   )
@@ -462,8 +464,8 @@ function IdleCameraCard() {
           <CardHeader className="flex-row items-center justify-between"><div><CardTitle>Home camera</CardTitle><CardDescription>Continuous local monitoring</CardDescription></div><Badge variant="secondary"><ShieldCheck /> {stateLabel}</Badge></CardHeader>
           <CardContent className="space-y-3">
             <LiveCameraView compact className="min-h-28" />
-            <p className="text-center text-xs text-muted-foreground">{state === "live" ? `${detections.length} current detection${detections.length === 1 ? "" : "s"}` : "YOLO is starting locally"}</p>
-            <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" />No-motion video is automatically discarded on this device.</p>
+            <p className="text-center text-xs text-muted-foreground">{state === "live" ? `${detections.length} current detection${detections.length === 1 ? "" : "s"}` : "Camera analysis is starting"}</p>
+            <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" />Frames without a confirmed event are not saved.</p>
           </CardContent>
         </Card>
         <DialogTrigger render={<Button type="button" variant="ghost" className="absolute inset-0 h-full w-full rounded-4xl bg-transparent p-0 hover:bg-accent/10" aria-label="Expand home camera" />}>
@@ -572,7 +574,7 @@ function TurnActivity({ stage }: { stage: TurnStage }) {
   const current = stageIndex[stage]
   const steps = [
     { label: "Understanding your request", detail: "Object and time intent identified", icon: Sparkles },
-    { label: "Searching semantic memory", detail: "Checking trusted household records", icon: Database },
+    { label: "Searching trusted memories", detail: "Checking household records", icon: Database },
     { label: "Retrieving supporting frames", detail: "Comparing recent object evidence", icon: FileSearch },
     { label: "Preparing a grounded answer", detail: "Adding time, confidence, and proof", icon: MessageCircle },
   ]
@@ -694,8 +696,8 @@ function ChatWorkspace({ audience, turn, onBack }: { audience: Role; turn: ChatT
                     <MessageScrollerItem messageId="answer" scrollAnchor>
                       <Message><MessageAvatar><TomoMark className="size-8" /></MessageAvatar><MessageContent><MessageHeader>TOMO</MessageHeader><Bubble variant="ghost" className="w-full"><BubbleContent className="w-full space-y-4 text-base">
                         <p>{turn.answer}</p>
-                        {memorySubmitted ? <Card size="sm"><CardContent className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-2xl bg-muted"><Database className="size-4" /></span><div><p className="font-medium">{audience === "caregiver" ? "Memory added" : "Sent for approval"}</p><p className="text-sm text-muted-foreground">{audience === "caregiver" ? "Caregiver-provided · Searchable in D1" : "Not searchable until a caregiver approves it"}</p></div><Badge variant="secondary" className="ml-auto">{audience === "caregiver" ? <><Check /> Trusted</> : "Pending"}</Badge></CardContent></Card> : turn.evidence[0] ? <EvidenceFrame evidence={turn.evidence[0]} /> : null}
-                      </BubbleContent></Bubble><MessageFooter>{turn.provider ? `${turn.repeated ? "Same latest observation · " : "Latest observation · "}Provider: ${turn.provider} · ${turn.evidenceCount} trusted result${turn.evidenceCount === 1 ? "" : "s"}` : "Grounded response"}</MessageFooter></MessageContent></Message>
+                        {memorySubmitted ? <Card size="sm"><CardContent className="flex items-center gap-3"><span className="flex size-10 items-center justify-center rounded-2xl bg-muted"><Database className="size-4" /></span><div><p className="font-medium">{audience === "caregiver" ? "Memory added" : "Sent for approval"}</p><p className="text-sm text-muted-foreground">{audience === "caregiver" ? "Saved as a trusted memory" : "Not searchable until a caregiver approves it"}</p></div><Badge variant="secondary" className="ml-auto">{audience === "caregiver" ? <><Check /> Trusted</> : "Pending"}</Badge></CardContent></Card> : turn.evidence[0] ? <EvidenceFrame evidence={turn.evidence[0]} /> : null}
+                      </BubbleContent></Bubble><MessageFooter>{turn.provider ? `${turn.repeated ? "Same latest observation · " : "Latest trusted information · "}${turn.evidenceCount} supporting result${turn.evidenceCount === 1 ? "" : "s"}` : "Grounded response"}</MessageFooter></MessageContent></Message>
                     </MessageScrollerItem>
                   )}
                 </MessageScrollerContent>
