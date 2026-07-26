@@ -454,8 +454,8 @@ function WeatherCard() {
 }
 
 function IdleCameraCard() {
-  const { detections, state } = useLiveCamera()
-  const stateLabel = state === "live" ? "On" : state === "blocked" ? "Permission needed" : state === "error" ? "Paused" : "Starting"
+  const { detections, state, stream } = useLiveCamera()
+  const stateLabel = stream ? "On" : state === "blocked" ? "Permission needed" : state === "error" ? "Paused" : "Starting"
   return (
     <Dialog>
       <div className="relative">
@@ -463,7 +463,7 @@ function IdleCameraCard() {
           <CardHeader className="flex-row items-center justify-between"><div><CardTitle>Home camera</CardTitle><CardDescription>Continuous local monitoring</CardDescription></div><Badge variant="secondary"><ShieldCheck /> {stateLabel}</Badge></CardHeader>
           <CardContent className="space-y-3">
             <LiveCameraView compact className="min-h-28" />
-            <p className="text-center text-xs text-muted-foreground">{state === "live" ? `${detections.length} current detection${detections.length === 1 ? "" : "s"}` : "Camera analysis is starting"}</p>
+            <p className="text-center text-xs text-muted-foreground">{state === "live" ? `${detections.length} current detection${detections.length === 1 ? "" : "s"}` : stream ? "Camera is on · detection is getting ready" : "Camera is starting"}</p>
             <p className="flex items-start gap-2 text-xs leading-5 text-muted-foreground"><LockKeyhole className="mt-0.5 size-3.5 shrink-0" />Frames without a confirmed event are not saved.</p>
           </CardContent>
         </Card>

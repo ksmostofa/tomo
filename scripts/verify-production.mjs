@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 
-const baseUrl = (process.env.TOMO_BASE_URL || "https://tomo-memoria.pages.dev").replace(/\/$/, "")
+const baseUrl = (process.env.TOMO_BASE_URL || "https://tomo-3aw.pages.dev").replace(/\/$/, "")
 const household = `verify_${Date.now()}_${crypto.randomUUID().slice(0, 8)}`
 const isolatedHousehold = `${household}_other`
 const results = []

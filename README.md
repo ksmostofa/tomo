@@ -12,12 +12,12 @@
   A privacy-first, voice-first memory and safety companion for older adults and their care circle.
 
   [![Next.js](https://img.shields.io/badge/Next.js-16-black?logo=nextdotjs)](https://nextjs.org/)
-  [![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1%20%2B%20Workers%20AI-F38020?logo=cloudflare&logoColor=white)](https://tomo-memoria.pages.dev)
+  [![Cloudflare Pages](https://img.shields.io/badge/Cloudflare-Pages%20%2B%20D1%20%2B%20Workers%20AI-F38020?logo=cloudflare&logoColor=white)](https://tomo-3aw.pages.dev)
   [![TypeScript](https://img.shields.io/badge/TypeScript-5.9-3178C6?logo=typescript&logoColor=white)](https://www.typescriptlang.org/)
   [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](./LICENSE)
 </div>
 
-**Live application:** [tomo-memoria.pages.dev](https://tomo-memoria.pages.dev) · **API health:** [tomo-memoria.pages.dev/api/health](https://tomo-memoria.pages.dev/api/health)
+**Live application:** [tomo-3aw.pages.dev](https://tomo-3aw.pages.dev) · **API health:** [tomo-3aw.pages.dev/api/health](https://tomo-3aw.pages.dev/api/health)
 
 ## What TOMO does
 

@@ -259,6 +259,7 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
     const motionCanvas = document.createElement("canvas")
     motionCanvas.width = MOTION_WIDTH
     motionCanvas.height = MOTION_HEIGHT
+    const cameraReadyAt = performance.now()
     let previousLuma: Uint8Array | null = null
     let lastFallInferenceAt = 0
     let lastMeaningfulMotionAt = 0
@@ -347,7 +348,7 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
           }
 
           if (motion.box) personalBurstRemaining = Math.max(personalBurstRemaining, 2)
-          if ((motion.box || personalBurstRemaining > 0) && !personalInferenceRunning && now - lastPersonalInferenceAt >= PERSONAL_INFERENCE_INTERVAL_MS) {
+          if (now - cameraReadyAt >= 3_000 && (motion.box || personalBurstRemaining > 0) && !personalInferenceRunning && now - lastPersonalInferenceAt >= PERSONAL_INFERENCE_INTERVAL_MS) {
             personalInferenceRunning = true
             if (!motion.box) personalBurstRemaining -= 1
             lastPersonalInferenceAt = now
@@ -620,20 +621,25 @@ export function LiveCameraProvider({ children }: { children: React.ReactNode }) 
       if (!fallSessionRef.current && !fallSessionPromiseRef.current) {
         fallLoadTimerRef.current = window.setTimeout(() => {
           fallLoadTimerRef.current = null
-          const fallSessionPromise = detector.ort.InferenceSession.create(FALL_MODEL_PATH, {
-            executionProviders: [detector.runtime === "WebGPU" ? "webgpu" : "wasm"],
-            graphOptimizationLevel: "all",
-          })
-          fallSessionPromiseRef.current = fallSessionPromise
-          void fallSessionPromise.then((fallSession) => {
-            if (runningRef.current) fallSessionRef.current = fallSession
-            else void fallSession.release()
-          }).catch((fallModelError) => {
-            console.error("Fall model startup failed; continuing with object detection", fallModelError)
-          }).finally(() => {
-            if (fallSessionPromiseRef.current === fallSessionPromise) fallSessionPromiseRef.current = null
-          })
-        }, 1_000)
+          const loadFallModel = () => {
+            if (!runningRef.current) return
+            const fallSessionPromise = detector.ort.InferenceSession.create(FALL_MODEL_PATH, {
+              executionProviders: [detector.runtime === "WebGPU" ? "webgpu" : "wasm"],
+              graphOptimizationLevel: "all",
+            })
+            fallSessionPromiseRef.current = fallSessionPromise
+            void fallSessionPromise.then((fallSession) => {
+              if (runningRef.current) fallSessionRef.current = fallSession
+              else void fallSession.release()
+            }).catch((fallModelError) => {
+              console.error("Fall model startup failed; continuing with object detection", fallModelError)
+            }).finally(() => {
+              if (fallSessionPromiseRef.current === fallSessionPromise) fallSessionPromiseRef.current = null
+            })
+          }
+          if ("requestIdleCallback" in window) window.requestIdleCallback(loadFallModel, { timeout: 8_000 })
+          else loadFallModel()
+        }, 6_000)
       }
     } catch (detectorError) {
       console.error("YOLO startup failed", detectorError)

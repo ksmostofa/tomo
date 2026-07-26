@@ -58,6 +58,9 @@ test("starts the front camera and detector together without exposing implementat
   const visibleImplementationDetails = /Starting private YOLO analysis|YOLO26n ·|YOLO26n object recognition|WebGPU ·|WebAssembly ·|Memoria temporal fall model|Provider:|Searchable in D1/
   assert.doesNotMatch(camera, visibleImplementationDetails)
   assert.doesNotMatch(ui, visibleImplementationDetails)
+  assert.match(camera, /now - cameraReadyAt >= 3_000/)
+  assert.match(camera, /requestIdleCallback/)
+  assert.match(camera, /}, 6_000\)/)
 })
 
 test("gates fall confirmation on a visible person and stronger fallen evidence", async () => {
