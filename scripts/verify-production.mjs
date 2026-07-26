@@ -211,6 +211,17 @@ await check("fall alert deduplication and resolution", async () => {
   const retrievedClip = await request(`/api/evidence?key=${encodeURIComponent(clip.payload.key)}`)
   assert.equal(retrievedClip.response.status, 200)
 
+  const foreignHeaders = { "x-tomo-household": isolatedHousehold }
+  const foreignClip = await request(`/api/evidence?key=${encodeURIComponent(clip.payload.key)}`, { headers: foreignHeaders })
+  assert.equal(foreignClip.response.status, 404)
+  const foreignAlerts = await request("/api/alerts", { headers: foreignHeaders })
+  assert.equal(foreignAlerts.response.status, 200)
+  assert.equal(foreignAlerts.payload.alerts.some((alert) => alert.id === alertId), false)
+  const foreignMemories = await request("/api/memories?q=possible%20fall", { headers: foreignHeaders })
+  assert.equal(foreignMemories.response.status, 200)
+  assert.equal(foreignMemories.payload.memories.some((memory) => memory.id === `alert:${alertId}`), false)
+  assert.match(retrievedClip.response.headers.get("cache-control") ?? "", /private.*no-store/)
+
   const incidentMemory = await request("/api/memories?q=possible%20fall")
   assert.equal(incidentMemory.response.status, 200)
   const storedIncident = incidentMemory.payload.memories.find((memory) => memory.id === `alert:${alertId}`)

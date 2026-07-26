@@ -1,7 +1,7 @@
 import { and, desc, eq, like, or } from "drizzle-orm";
 import { getDbOptional } from "@/db";
 import { alerts, approvals, households, memories } from "@/db/schema";
-import { householdFrom, readJson, requireText, RouteError, routeError } from "@/lib/server/http";
+import { householdFrom, privateResponseHeaders, readJson, requireText, RouteError, routeError } from "@/lib/server/http";
 import { createEmbedding } from "@/lib/server/providers/ai";
 import { notifyCaregiver } from "@/lib/server/providers/email";
 
@@ -33,7 +33,7 @@ export async function GET(request: Request) {
       ? and(eq(memories.householdId, householdId), eq(memories.approvalState, "trusted"), or(like(memories.description, `%${query}%`), like(memories.objectLabels, `%${query}%`)))
       : and(eq(memories.householdId, householdId), eq(memories.approvalState, "trusted"));
     const rows = await db.select().from(memories).where(where).orderBy(desc(memories.occurredAt)).limit(30);
-    return Response.json({ memories: rows.map(withoutEmbedding) });
+    return Response.json({ memories: rows.map(withoutEmbedding) }, { headers: privateResponseHeaders });
   } catch (error) {
     return routeError(error);
   }

@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDbOptional } from "@/db";
 import { alerts, households, memories } from "@/db/schema";
-import { householdFrom, readJson, requireText, RouteError, routeError } from "@/lib/server/http";
+import { householdFrom, privateResponseHeaders, readJson, requireText, RouteError, routeError } from "@/lib/server/http";
 import { notifyCaregiver } from "@/lib/server/providers/email";
 
 export async function GET(request: Request) {
@@ -9,7 +9,7 @@ export async function GET(request: Request) {
     const db = getDbOptional();
     if (!db) throw new RouteError(503, "Alert storage is not configured yet");
     const rows = await db.select().from(alerts).where(eq(alerts.householdId, householdFrom(request))).orderBy(desc(alerts.createdAt)).limit(30);
-    return Response.json({ alerts: rows });
+    return Response.json({ alerts: rows }, { headers: privateResponseHeaders });
   } catch (error) {
     return routeError(error);
   }

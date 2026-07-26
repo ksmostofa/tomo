@@ -128,6 +128,21 @@ test("includes D1-backed API routes and a reproducible Pages build", async () =>
   ])
 })
 
+test("keeps household evidence private and uncacheable", async () => {
+  const [http, evidence, alerts, memories] = await Promise.all([
+    source("lib/server/http.ts"),
+    source("app/api/evidence/route.ts"),
+    source("app/api/alerts/route.ts"),
+    source("app/api/memories/route.ts"),
+  ])
+  assert.match(http, /private, no-store, max-age=0/)
+  assert.match(http, /Vary.*x-tomo-household/)
+  assert.match(evidence, /key\.startsWith\(`\$\{householdId\}\//)
+  assert.match(evidence, /X-Content-Type-Options/)
+  assert.match(alerts, /eq\(alerts\.householdId, householdFrom\(request\)\)/)
+  assert.match(memories, /eq\(memories\.householdId, householdId\)/)
+})
+
 test("does not publish private execution plans", async () => {
   await assert.rejects(access(new URL("outputs/tomo-execution-plan.md", root)))
   await assert.rejects(access(new URL("tomo-final-project-plan.md", root)))

@@ -4,6 +4,12 @@ export class RouteError extends Error {
   }
 }
 
+export const privateResponseHeaders = {
+  "Cache-Control": "private, no-store, max-age=0",
+  "Vary": "x-tomo-household",
+  "X-Content-Type-Options": "nosniff",
+};
+
 export async function readJson<T>(request: Request): Promise<T> {
   const contentType = request.headers.get("content-type") ?? "";
   if (!contentType.includes("application/json")) throw new RouteError(415, "Content-Type must be application/json");
@@ -15,9 +21,9 @@ export async function readJson<T>(request: Request): Promise<T> {
 }
 
 export function routeError(error: unknown) {
-  if (error instanceof RouteError) return Response.json({ error: error.message }, { status: error.status });
+  if (error instanceof RouteError) return Response.json({ error: error.message }, { status: error.status, headers: privateResponseHeaders });
   console.error(error);
-  return Response.json({ error: "Unexpected server error" }, { status: 500 });
+  return Response.json({ error: "Unexpected server error" }, { status: 500, headers: privateResponseHeaders });
 }
 
 export function requireText(value: unknown, field: string, maxLength = 4_000) {

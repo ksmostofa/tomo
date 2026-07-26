@@ -1,7 +1,7 @@
 import { and, desc, eq } from "drizzle-orm";
 import { getDbOptional } from "@/db";
 import { auditEvents, memories } from "@/db/schema";
-import { householdFrom, readJson, requireText, routeError } from "@/lib/server/http";
+import { householdFrom, privateResponseHeaders, readJson, requireText, routeError } from "@/lib/server/http";
 import { createEmbedding, generateAnswer } from "@/lib/server/providers/ai";
 
 function cosineSimilarity(left: number[] | null, right: number[] | null) {
@@ -102,7 +102,7 @@ export async function POST(request: Request) {
       repeated,
       latestObservedAt: primary?.occurredAt ?? null,
       evidence: candidates.map(({ id, description, occurredAt, bestFrameKey, evidenceDataUrl, boxes }) => ({ id, description, occurredAt, bestFrameKey, evidenceDataUrl, boxes })),
-    });
+    }, { headers: privateResponseHeaders });
   } catch (error) {
     return routeError(error);
   }

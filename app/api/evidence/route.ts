@@ -44,7 +44,12 @@ export async function GET(request: Request) {
     if (!key || !key.startsWith(`${householdId}/`)) throw new RouteError(404, "Evidence was not found");
     const object = await bucket.get(key);
     if (!object) throw new RouteError(404, "Evidence was not found");
-    const headers = new Headers({ "Cache-Control": "private, no-store" });
+    const headers = new Headers({
+      "Cache-Control": "private, no-store, max-age=0",
+      "Vary": "x-tomo-household",
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; media-src 'self' blob:",
+    });
     object.writeHttpMetadata(headers);
     return new Response(object.body, { headers });
   } catch (error) {
